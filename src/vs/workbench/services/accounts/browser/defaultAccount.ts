@@ -409,7 +409,7 @@ class DefaultAccountProvider extends Disposable implements IDefaultAccountProvid
 
 		const declaredProvider = this.authenticationService.declaredProviders.find(provider => provider.id === defaultAccountProvider.id);
 		if (!declaredProvider) {
-			this.logService.info(`[DefaultAccount] Authentication provider is not declared.`, defaultAccountProvider);
+			this.logService.debug(`[DefaultAccount] Authentication provider is not declared.`, defaultAccountProvider);
 			return null;
 		}
 

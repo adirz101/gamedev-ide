@@ -1069,3 +1069,8 @@ Registry.as<IConfigurationMigrationRegistry>(Extensions.ConfigurationMigration)
 			return result;
 		}
 	}]);
+
+// Register product configuration defaults (e.g., from product.json)
+if (product.configurationDefaults) {
+	registry.registerDefaultConfigurations([{ overrides: product.configurationDefaults }]);
+}

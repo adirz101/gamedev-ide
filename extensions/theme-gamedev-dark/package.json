@@ -1,0 +1,24 @@
+{
+	"name": "theme-gamedev-dark",
+	"displayName": "GameDev IDE Dark",
+	"description": "Minimal dark theme for GameDev IDE inspired by modern IDEs",
+	"version": "1.0.0",
+	"publisher": "gamedev-ide",
+	"license": "MIT",
+	"engines": {
+		"vscode": "*"
+	},
+	"categories": [
+		"Themes"
+	],
+	"contributes": {
+		"themes": [
+			{
+				"id": "GameDev IDE Dark",
+				"label": "GameDev IDE Dark",
+				"uiTheme": "vs-dark",
+				"path": "./themes/gamedev-dark-color-theme.json"
+			}
+		]
+	}
+}

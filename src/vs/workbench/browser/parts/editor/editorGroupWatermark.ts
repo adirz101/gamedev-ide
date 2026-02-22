@@ -42,7 +42,6 @@ const startDebugging: WatermarkEntry = { text: localize('watermark.startDebuggin
 const openSettings: WatermarkEntry = { text: localize('watermark.openSettings', "Open Settings"), id: 'workbench.action.openSettings' };
 
 const baseEntries: WatermarkEntry[] = [
-	openChat,
 	showCommands,
 ];
 

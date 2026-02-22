@@ -89,7 +89,8 @@ function registerChatViewIfEnabled(): ViewContainer | undefined {
 	return viewContainer;
 }
 
-const chatViewContainer = registerChatViewIfEnabled();
+// Register chat view if enabled (result intentionally unused)
+registerChatViewIfEnabled();
 
 const chatParticipantExtensionPoint = extensionsRegistry.ExtensionsRegistry.registerExtensionPoint<IRawChatParticipantContribution[]>({
 	extensionPoint: 'chatParticipants',
