@@ -32,52 +32,64 @@ import { IRawChatParticipantContribution } from '../common/participants/chatPart
 import { ChatAgentLocation, ChatModeKind } from '../common/constants.js';
 import { ChatViewId, ChatViewContainerId } from './chat.js';
 import { ChatViewPane } from './widgetHosts/viewPane/chatViewPane.js';
+import product from '../../../../platform/product/common/product.js';
 
-// --- Chat Container &  View Registration
+// --- Chat Container &  View Registration (only if chat agent is configured)
 
 const chatViewIcon = registerIcon('chat-view-icon', Codicon.chatSparkle, localize('chatViewIcon', 'View icon of the chat view.'));
 
-const chatViewContainer: ViewContainer = Registry.as<IViewContainersRegistry>(ViewExtensions.ViewContainersRegistry).registerViewContainer({
-	id: ChatViewContainerId,
-	title: localize2('chat.viewContainer.label', "Chat"),
-	icon: chatViewIcon,
-	ctorDescriptor: new SyncDescriptor(ViewPaneContainer, [ChatViewContainerId, { mergeViewWithContainerWhenSingleView: true }]),
-	storageId: ChatViewContainerId,
-	hideIfEmpty: true,
-	order: 1,
-}, ViewContainerLocation.AuxiliaryBar, { isDefault: true, doNotRegisterOpenCommand: true });
+// Only register chat view if a chat agent is configured
+function registerChatViewIfEnabled(): ViewContainer | undefined {
+	if (!product.defaultChatAgent?.chatExtensionId) {
+		return undefined;
+	}
 
-const chatViewDescriptor: IViewDescriptor = {
-	id: ChatViewId,
-	containerIcon: chatViewContainer.icon,
-	containerTitle: chatViewContainer.title.value,
-	singleViewPaneContainerTitle: chatViewContainer.title.value,
-	name: localize2('chat.viewContainer.label', "Chat"),
-	canToggleVisibility: false,
-	canMoveView: true,
-	openCommandActionDescriptor: {
+	const viewContainer = Registry.as<IViewContainersRegistry>(ViewExtensions.ViewContainersRegistry).registerViewContainer({
 		id: ChatViewContainerId,
-		title: chatViewContainer.title,
-		mnemonicTitle: localize({ key: 'miToggleChat', comment: ['&& denotes a mnemonic'] }, "&&Chat"),
-		keybindings: {
-			primary: KeyMod.CtrlCmd | KeyMod.Alt | KeyCode.KeyI,
-			mac: {
-				primary: KeyMod.CtrlCmd | KeyMod.WinCtrl | KeyCode.KeyI
-			}
+		title: localize2('chat.viewContainer.label', "Chat"),
+		icon: chatViewIcon,
+		ctorDescriptor: new SyncDescriptor(ViewPaneContainer, [ChatViewContainerId, { mergeViewWithContainerWhenSingleView: true }]),
+		storageId: ChatViewContainerId,
+		hideIfEmpty: true,
+		order: 1,
+	}, ViewContainerLocation.AuxiliaryBar, { isDefault: true, doNotRegisterOpenCommand: true });
+
+	const chatViewDescriptor: IViewDescriptor = {
+		id: ChatViewId,
+		containerIcon: viewContainer.icon,
+		containerTitle: viewContainer.title.value,
+		singleViewPaneContainerTitle: viewContainer.title.value,
+		name: localize2('chat.viewContainer.label', "Chat"),
+		canToggleVisibility: false,
+		canMoveView: true,
+		openCommandActionDescriptor: {
+			id: ChatViewContainerId,
+			title: viewContainer.title,
+			mnemonicTitle: localize({ key: 'miToggleChat', comment: ['&& denotes a mnemonic'] }, "&&Chat"),
+			keybindings: {
+				primary: KeyMod.CtrlCmd | KeyMod.Alt | KeyCode.KeyI,
+				mac: {
+					primary: KeyMod.CtrlCmd | KeyMod.WinCtrl | KeyCode.KeyI
+				}
+			},
+			order: 1
 		},
-		order: 1
-	},
-	ctorDescriptor: new SyncDescriptor(ChatViewPane),
-	when: ContextKeyExpr.or(
-		ContextKeyExpr.or(
-			ChatContextKeys.Setup.hidden,
-			ChatContextKeys.Setup.disabled
-		)?.negate(),
-		ChatContextKeys.panelParticipantRegistered,
-		ChatContextKeys.extensionInvalid
-	)
-};
-Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([chatViewDescriptor], chatViewContainer);
+		ctorDescriptor: new SyncDescriptor(ChatViewPane),
+		when: ContextKeyExpr.or(
+			ContextKeyExpr.or(
+				ChatContextKeys.Setup.hidden,
+				ChatContextKeys.Setup.disabled
+			)?.negate(),
+			ChatContextKeys.panelParticipantRegistered,
+			ChatContextKeys.extensionInvalid
+		)
+	};
+	Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([chatViewDescriptor], viewContainer);
+
+	return viewContainer;
+}
+
+const chatViewContainer = registerChatViewIfEnabled();
 
 const chatParticipantExtensionPoint = extensionsRegistry.ExtensionsRegistry.registerExtensionPoint<IRawChatParticipantContribution[]>({
 	extensionPoint: 'chatParticipants',
