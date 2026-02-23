@@ -245,7 +245,24 @@ if (product.configurationDefaults) {
 
 ---
 
-### 9. Hygiene Check Bypass
+### 9. Panel Alignment (Full Width)
+
+**File: `/src/vs/workbench/browser/layout.ts`**
+
+Changed default panel alignment from `'center'` to `'justify'`:
+```typescript
+// Line ~2795
+PANEL_ALIGNMENT: new RuntimeStateKey<PanelAlignment>('panel.alignment', StorageScope.PROFILE, StorageTarget.USER, 'justify'),
+// Was: 'center'
+```
+
+**Why this matters:**
+- `'center'` = Panel only spans editor width (gap between sidebar and panel)
+- `'justify'` = Panel spans full width, connects with sidebar (standard VS Code behavior)
+
+---
+
+### 10. Hygiene Check Bypass
 
 **File: `/build/hygiene.ts`**
 
@@ -328,6 +345,7 @@ When working on GameDev IDE UI:
 4. **Welcome page CSS** is in `.../welcomeGettingStarted/browser/media/gettingStarted.css`
 5. **Default settings** are in `/product.json` under `configurationDefaults`
 6. **Chat removal** is in `/src/vs/workbench/contrib/chat/browser/chatParticipant.contribution.ts`
+7. **Panel alignment** is in `/src/vs/workbench/browser/layout.ts` (PANEL_ALIGNMENT default)
 
 **Always delete `~/.gamedev-ide-dev` when testing default settings changes!**
 
