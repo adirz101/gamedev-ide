@@ -213,6 +213,9 @@ import './contrib/mcp/browser/mcp.contribution.js';
 import './contrib/chat/browser/chatSessions/chatSessions.contribution.js';
 import './contrib/chat/browser/contextContrib/chatContext.contribution.js';
 
+// GameDev AI Chat
+import './contrib/gamedevChat/browser/gamedevChat.contribution.js';
+
 // Interactive
 import './contrib/interactive/browser/interactive.contribution.js';
 
