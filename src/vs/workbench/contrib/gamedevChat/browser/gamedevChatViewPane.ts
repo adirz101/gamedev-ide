@@ -196,6 +196,7 @@ export class GameDevChatViewPane extends ViewPane {
 		leftTools.style.cssText = 'display: flex; gap: 8px; align-items: center;';
 
 		const agentBtn = append(leftTools, $('button'));
+		agentBtn.disabled = true;
 		agentBtn.style.cssText = `
 			display: flex;
 			align-items: center;
@@ -206,7 +207,8 @@ export class GameDevChatViewPane extends ViewPane {
 			padding: 4px 10px;
 			border-radius: 4px;
 			font-size: 12px;
-			cursor: pointer;
+			cursor: not-allowed;
+			opacity: 0.5;
 		`;
 		const agentIcon = append(agentBtn, $('span'));
 		// allow-any-unicode-next-line
@@ -220,6 +222,7 @@ export class GameDevChatViewPane extends ViewPane {
 		agentArrow.style.fontSize = '10px';
 
 		const autoBtn = append(leftTools, $('button'));
+		autoBtn.disabled = true;
 		autoBtn.style.cssText = `
 			display: flex;
 			align-items: center;
@@ -229,8 +232,8 @@ export class GameDevChatViewPane extends ViewPane {
 			color: var(--vscode-foreground);
 			padding: 4px 8px;
 			font-size: 12px;
-			cursor: pointer;
-			opacity: 0.7;
+			cursor: not-allowed;
+			opacity: 0.4;
 		`;
 		const autoText = append(autoBtn, $('span'));
 		autoText.textContent = 'Auto';
@@ -238,37 +241,6 @@ export class GameDevChatViewPane extends ViewPane {
 		// allow-any-unicode-next-line
 		autoArrow.textContent = '▾';
 		autoArrow.style.fontSize = '10px';
-
-		const rightTools = append(toolbar, $('.right-tools'));
-		rightTools.style.cssText = 'display: flex; gap: 8px; align-items: center;';
-
-		const imageBtn = append(rightTools, $('button'));
-		// allow-any-unicode-next-line
-		imageBtn.textContent = '🖼';
-		imageBtn.title = 'Add image';
-		imageBtn.style.cssText = `
-			background: none;
-			border: none;
-			color: var(--vscode-foreground);
-			cursor: pointer;
-			font-size: 16px;
-			padding: 4px;
-			opacity: 0.7;
-		`;
-
-		const micBtn = append(rightTools, $('button'));
-		// allow-any-unicode-next-line
-		micBtn.textContent = '🎤';
-		micBtn.title = 'Voice input';
-		micBtn.style.cssText = `
-			background: none;
-			border: none;
-			color: var(--vscode-foreground);
-			cursor: pointer;
-			font-size: 16px;
-			padding: 4px;
-			opacity: 0.7;
-		`;
 
 		// Initial render
 		this.renderMessages();
@@ -281,7 +253,34 @@ export class GameDevChatViewPane extends ViewPane {
 		const messages = this.chatService.messages;
 
 		if (messages.length === 0) {
-			// Empty state - just show nothing, ready for input
+			// Welcome state
+			const welcomeContainer = append(this.messagesContainer, $('.welcome-container'));
+			welcomeContainer.style.cssText = `
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
+				height: 100%;
+				text-align: center;
+				padding: 20px;
+			`;
+
+			const welcomeTitle = append(welcomeContainer, $('h2'));
+			welcomeTitle.textContent = 'Welcome to GameDev IDE';
+			welcomeTitle.style.cssText = `
+				font-size: 18px;
+				font-weight: 600;
+				color: var(--vscode-foreground);
+				margin: 0 0 8px 0;
+			`;
+
+			const welcomeSubtitle = append(welcomeContainer, $('p'));
+			welcomeSubtitle.textContent = 'Ask me anything about your code or game development.';
+			welcomeSubtitle.style.cssText = `
+				font-size: 13px;
+				color: var(--vscode-descriptionForeground);
+				margin: 0;
+			`;
 			return;
 		}
 
