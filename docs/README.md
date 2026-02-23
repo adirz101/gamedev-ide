@@ -48,7 +48,8 @@ Game developers get **one unified IDE** with everything integrated.
 |-------|---------|--------|
 | **[MIGRATION_PLAN.md](./MIGRATION_PLAN.md)** | Overall migration strategy | ✅ Current |
 | **[UI_CUSTOMIZATION.md](./UI_CUSTOMIZATION.md)** | UI/theming changes (Cursor-like design) | ✅ Complete |
-| **AI_ASSISTANT.md** | AI chat migration guide | 📝 Coming soon |
+| **[AI_CHAT.md](./AI_CHAT.md)** | Built-in AI chat implementation | ✅ Complete |
+| **[last_conversation_context.md](./last_conversation_context.md)** | Context for next development session | ✅ Current |
 | **UNITY_INTEGRATION.md** | Scene viewer migration | 📝 Coming soon |
 | **PIXEL_EDITOR.md** | Pixel art editor migration | 📝 Coming soon |
 | **ASSET_GENERATION.md** | PixelLab integration | 📝 Coming soon |
@@ -345,21 +346,25 @@ You'll know the migration is successful when:
   - Activity bar at top with centered icons
   - Custom dark theme (GameDev IDE Dark)
   - Clean welcome page (no walkthroughs)
-  - Chat panel removed
   - Extensions marketplace configured (Open VSX)
-- Extension scaffolds created
+- **AI Chat implemented** (see [AI_CHAT.md](./AI_CHAT.md))
+  - Built-in workbench contribution (not extension)
+  - Cursor-style chat in right sidebar (auxiliary bar)
+  - Claude API with streaming responses
+  - API key from .env file (dynamic loading)
+  - Welcome message, markdown rendering
+  - Agent/Auto dropdowns (disabled, placeholder for future)
 - Build system working
 - Documentation written
 
 ### 🏗️ In Progress
-- Migration planning and documentation
-- Preparing AI assistant migration
+- Agent mode implementation
+- Auto mode implementation
 
 ### 📋 Next Up
-- Port AI Assistant (Week 1-2)
-- Port Unity Integration (Week 3-4)
-- Port Pixel Editor (Week 5-6)
-- Port Asset Generation (Week 7-8)
+- Port Unity Integration
+- Port Pixel Editor
+- Port Asset Generation
 
 ---
 

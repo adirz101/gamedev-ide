@@ -8,8 +8,17 @@ Complete directory breakdown for the VS Code fork and extension architecture.
 
 ```
 gamedev-ide/  (VS Code Fork)
+├── src/                         ← VS CODE SOURCE
+│   └── vs/
+│       └── workbench/
+│           └── contrib/
+│               └── gamedevChat/ ← BUILT-IN AI CHAT (Cursor-style)
+│                   └── browser/
+│                       ├── gamedevChat.contribution.ts
+│                       ├── gamedevChatService.ts
+│                       └── gamedevChatViewPane.ts
+│
 ├── extensions/                   ← OUR GAME DEV EXTENSIONS
-│   ├── gamedev-ai/              AI Assistant
 │   ├── godot-integration/       Godot scene viewer (to rename to unity-integration)
 │   ├── asset-generation/        PixelLab + asset browser
 │   ├── pixel-editor/            Pixel art editor (to be created)
@@ -21,60 +30,51 @@ gamedev-ide/  (VS Code Fork)
 │   ├── STRUCTURE.md             This file
 │   ├── DEVELOPMENT.md           Development workflow
 │   ├── UI_CUSTOMIZATION.md      UI/theming changes (Cursor-like design)
+│   ├── AI_CHAT.md               AI chat implementation details
+│   ├── last_conversation_context.md  Context for next agent
 │   └── archive/                 Outdated docs
-│
-├── src/                         ← VS CODE SOURCE (mostly untouched)
-│   └── vs/
-│       └── workbench/
-│           └── contrib/         VSCode's built-in features
 │
 ├── product.json                 ← Branding (GameDev IDE)
 ├── package.json                 ← Dependencies
+├── .env                         ← API keys (not in git)
 ├── run.sh                       ← Launch script
 └── [other VSCode files]
 ```
 
 ---
 
-## Our Code: Extensions
+## Our Code: Built-in Contributions + Extensions
 
-All our custom game development features are **VS Code extensions** in the `extensions/` directory.
+Game development features are implemented as either **built-in workbench contributions** (for deep integration) or **extensions** (for modular features).
 
-### Extension 1: AI Assistant
+### Built-in: AI Chat (Cursor-style)
+
+**Location:** `src/vs/workbench/contrib/gamedevChat/browser/`
 
 ```
-extensions/gamedev-ai/
-├── package.json                 ← Extension manifest
-├── src/
-│   ├── extension.ts             ← Entry point (activate/deactivate)
-│   ├── claudeService.ts         ← Claude API client
-│   ├── contextBuilder.ts        ← Project analysis & context
-│   ├── chatProvider.ts          ← Webview provider for chat UI
-│   ├── tools/                   ← AI tools (function calling)
-│   │   ├── fileEditTool.ts
-│   │   └── sceneEditTool.ts
-│   └── webview/                 ← React UI for chat (if using webview)
-│       ├── index.tsx
-│       ├── ChatPanel.tsx
-│       └── ...
-├── out/                         ← Compiled JavaScript
-└── media/                       ← Icons, CSS for webview
+src/vs/workbench/contrib/gamedevChat/browser/
+├── gamedevChat.contribution.ts  ← View registration & service binding
+├── gamedevChatService.ts        ← Claude API client with streaming
+└── gamedevChatViewPane.ts       ← Chat UI (ViewPane)
 ```
+
+**Why built-in instead of extension?**
+- Deeper integration with VS Code UI
+- Cursor-like feel (appears in auxiliary bar)
+- More control over layout and behavior
 
 **What it does:**
-- AI chat panel in sidebar
-- Claude API integration
-- Project context building (analyzes Unity projects)
-- Tool use (AI can edit files, modify scenes)
+- AI chat panel in right sidebar (auxiliary bar)
+- Claude API integration with streaming
+- API key from .env file (dynamic loading)
+- Message persistence
+- Markdown rendering
 
-**Source to migrate from:**
-- `GameDevIDE/src/main/services/ai/ClaudeService.ts`
-- `GameDevIDE/src/main/services/ai/ContextBuilder.ts`
-- `GameDevIDE/src/renderer/components/ai/ChatPanel.tsx`
+**See [AI_CHAT.md](./AI_CHAT.md) for complete implementation details.**
 
 ---
 
-### Extension 2: Unity Integration
+### Extension: Unity Integration
 
 ```
 extensions/unity-integration/    (currently named godot-integration)
@@ -110,7 +110,7 @@ extensions/unity-integration/    (currently named godot-integration)
 
 ---
 
-### Extension 3: Asset Generation
+### Extension: Asset Generation
 
 ```
 extensions/asset-generation/
@@ -141,7 +141,7 @@ extensions/asset-generation/
 
 ---
 
-### Extension 4: Pixel Editor
+### Extension: Pixel Editor
 
 ```
 extensions/pixel-editor/         (to be created)
@@ -181,7 +181,7 @@ extensions/pixel-editor/         (to be created)
 
 ---
 
-### Extension 5: Custom Theme
+### Extension: Custom Theme
 
 ```
 extensions/theme-gamedev-dark/
