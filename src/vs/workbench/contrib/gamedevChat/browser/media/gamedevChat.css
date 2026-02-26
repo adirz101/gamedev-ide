@@ -50,6 +50,7 @@
 .gamedev-chat-messages .message-content pre {
 	overflow-x: auto;
 	max-width: 100%;
+	position: relative;
 }
 
 .gamedev-chat-messages .message-content code {
@@ -101,4 +102,19 @@
 
 .gamedev-attachment-chip .gamedev-attachment-remove:hover {
 	opacity: 1 !important;
+}
+
+/* Copy button on code blocks */
+.gamedev-code-copy-btn:hover {
+	filter: brightness(1.2);
+}
+
+/* Stop button */
+.gamedev-stop-btn:hover {
+	filter: brightness(1.15);
+}
+
+/* Mode toggle button */
+.gamedev-mode-btn:hover {
+	filter: brightness(1.1);
 }

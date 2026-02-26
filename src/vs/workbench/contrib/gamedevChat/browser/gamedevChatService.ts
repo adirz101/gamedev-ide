@@ -6,6 +6,7 @@
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { URI } from '../../../../base/common/uri.js';
+import { VSBuffer } from '../../../../base/common/buffer.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
@@ -13,12 +14,21 @@ import { FileAccess } from '../../../../base/common/network.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { IUnityProjectService } from '../../gamedevUnity/common/types.js';
 import { buildSkillsPromptBlock, GameEngine } from './skills/gamedevSkillsRegistry.js';
+import { IBulkEditService, ResourceTextEdit } from '../../../../editor/browser/services/bulkEditService.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
+import { Range } from '../../../../editor/common/core/range.js';
 
 export const enum StreamingPhase {
 	None = 0,
 	LoadingContext = 1,
 	Thinking = 2,
 	Responding = 3,
+}
+
+export const enum ChatMode {
+	Ask = 'ask',
+	Agent = 'agent',
 }
 
 export interface IStreamingChunkEvent {
@@ -62,9 +72,13 @@ export interface IGameDevChatService {
 	readonly isStreaming: boolean;
 
 	sendMessage(content: string, options?: ISendMessageOptions): Promise<void>;
+	stopStreaming(): void;
 	clearMessages(): void;
 	readonly includeProjectContext: boolean;
 	setIncludeProjectContext(include: boolean): void;
+	readonly mode: ChatMode;
+	setMode(mode: ChatMode): void;
+	readonly onDidChangeMode: Event<ChatMode>;
 	hasProjectContext(): boolean;
 	getProjectName(): string | undefined;
 	setApiKey(apiKey: string): void;
@@ -75,6 +89,7 @@ export const IGameDevChatService = createDecorator<IGameDevChatService>('gameDev
 
 const STORAGE_KEY_MESSAGES = 'gamedevChat.messages';
 const STORAGE_KEY_API_KEY = 'gamedevChat.apiKey';
+const STORAGE_KEY_MODE = 'gamedevChat.mode';
 
 export class GameDevChatService extends Disposable implements IGameDevChatService {
 	declare readonly _serviceBrand: undefined;
@@ -83,6 +98,8 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 	private _isStreaming = false;
 	private _apiKey: string | undefined;
 	private _includeProjectContext = true;
+	private _mode: ChatMode = ChatMode.Ask;
+	private _abortController: AbortController | undefined;
 
 	private readonly _onDidUpdateMessages = this._register(new Emitter<void>());
 	readonly onDidUpdateMessages = this._onDidUpdateMessages.event;
@@ -96,14 +113,21 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 	private readonly _onDidReceiveChunk = this._register(new Emitter<IStreamingChunkEvent>());
 	readonly onDidReceiveChunk = this._onDidReceiveChunk.event;
 
+	private readonly _onDidChangeMode = this._register(new Emitter<ChatMode>());
+	readonly onDidChangeMode = this._onDidChangeMode.event;
+
 	constructor(
 		@IStorageService private readonly storageService: IStorageService,
 		@IFileService private readonly fileService: IFileService,
 		@IUnityProjectService private readonly unityProjectService: IUnityProjectService,
+		@IBulkEditService private readonly bulkEditService: IBulkEditService,
+		@IEditorService private readonly editorService: IEditorService,
+		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 	) {
 		super();
 		this._loadMessages();
 		this._loadApiKey();
+		this._loadMode();
 	}
 
 	get messages(): IChatMessage[] {
@@ -120,6 +144,34 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 
 	setIncludeProjectContext(include: boolean): void {
 		this._includeProjectContext = include;
+	}
+
+	get mode(): ChatMode {
+		return this._mode;
+	}
+
+	setMode(mode: ChatMode): void {
+		if (this._mode !== mode) {
+			this._mode = mode;
+			this.storageService.store(STORAGE_KEY_MODE, mode, StorageScope.PROFILE, StorageTarget.USER);
+			this._onDidChangeMode.fire(mode);
+		}
+	}
+
+	stopStreaming(): void {
+		if (this._abortController) {
+			this._abortController.abort();
+			this._abortController = undefined;
+		}
+	}
+
+	private _loadMode(): void {
+		const stored = this.storageService.get(STORAGE_KEY_MODE, StorageScope.PROFILE);
+		if (stored === ChatMode.Agent) {
+			this._mode = ChatMode.Agent;
+		} else {
+			this._mode = ChatMode.Ask;
+		}
 	}
 
 	private _loadMessages(): void {
@@ -246,6 +298,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 
 		// Start streaming
 		this._isStreaming = true;
+		this._abortController = new AbortController();
 		this._onDidStartStreaming.fire();
 
 		// Add placeholder assistant message
@@ -263,13 +316,27 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		try {
 			await this._streamResponse(assistantMessage, shouldIncludeContext, augmentedContent);
 		} catch (error) {
-			assistantMessage.content = `Error: ${error instanceof Error ? error.message : String(error)}`;
+			if (error instanceof DOMException && error.name === 'AbortError') {
+				// User stopped streaming — keep partial content
+				if (!assistantMessage.content) {
+					assistantMessage.content = '[Stopped by user]';
+				}
+			} else {
+				assistantMessage.content = `Error: ${error instanceof Error ? error.message : String(error)}`;
+			}
 			assistantMessage.isStreaming = false;
 			assistantMessage.streamingPhase = StreamingPhase.None;
 			this._onDidUpdateMessages.fire();
 		} finally {
+			this._abortController = undefined;
 			this._isStreaming = false;
 			this._onDidStopStreaming.fire();
+
+			// In Agent mode, apply file edits from code blocks
+			if (this._mode === ChatMode.Agent && assistantMessage.content) {
+				await this._applyAgentEdits(assistantMessage.content);
+			}
+
 			this._saveMessages();
 		}
 	}
@@ -294,10 +361,30 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		}
 
 		// Build system message as blocks for prompt caching
+		const projectInfo = this.unityProjectService.currentProject;
+		const isUnity = projectInfo?.isUnityProject;
+		const projectName = projectInfo?.projectName;
+
+		// Build project-awareness preamble
+		let projectPreamble = '';
+		if (isUnity && projectName) {
+			projectPreamble = `\n\nYou are working directly inside the user's Unity project "${projectName}". You have full access to the project structure, scripts, and configuration. Reference specific project files and structures when relevant. The user trusts you as their expert Unity co-developer — be confident and specific, not generic.`;
+		} else if (isUnity) {
+			projectPreamble = '\n\nYou are working directly inside the user\'s Unity project. You have full access to the project structure, scripts, and configuration. Reference specific project files and structures when relevant. The user trusts you as their expert Unity co-developer — be confident and specific, not generic.';
+		}
+
+		let modeInstructions: string;
+		if (this._mode === ChatMode.Agent) {
+			modeInstructions = `\n\nYou are in AGENT mode. When you write or edit code, your files are AUTOMATICALLY written to the project — the user does NOT need to copy anything manually. Output each file as a fenced code block with the language and file path in the format \`\`\`language:path/to/file. Include the COMPLETE file contents. For example:\n\`\`\`csharp:Assets/Scripts/Player.cs\nusing UnityEngine;\npublic class Player : MonoBehaviour { }\n\`\`\`\nNever tell the user to "copy" or "create" files — they are applied automatically. Just explain what you changed and why.`;
+		} else {
+			modeInstructions = '\n\nYou are in ASK mode. Present code in standard fenced code blocks. Each code block has a copy button the user can use. Never tell the user to "create a file at..." or give manual file path instructions — just present the code naturally and explain it. The user can copy what they need directly from the code blocks.';
+		}
+
+		const basePrompt = 'You are an expert AI assistant for game development, embedded directly in the user\'s IDE. You help with Unity, Godot, C#, GDScript, game design, architecture patterns, and general programming questions. Give accurate, production-quality advice. When writing code, follow engine best practices and avoid common pitfalls.' + projectPreamble + modeInstructions;
 		const systemBlocks: Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> = [
 			{
 				type: 'text',
-				text: 'You are an expert AI assistant for game development. You help with Unity, Godot, C#, GDScript, game design, architecture patterns, and general programming questions. Give accurate, production-quality advice. When writing code, follow engine best practices and avoid common pitfalls.',
+				text: basePrompt,
 			}
 		];
 
@@ -355,6 +442,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 					budget_tokens: 10000,
 				},
 			}),
+			signal: this._abortController?.signal,
 		});
 
 		if (!response.ok) {
@@ -481,6 +569,53 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		assistantMessage.isStreaming = false;
 		assistantMessage.streamingPhase = StreamingPhase.None;
 		this._onDidUpdateMessages.fire();
+	}
+
+	private _parseFileCodeBlocks(content: string): { filePath: string; language: string; code: string }[] {
+		const results: { filePath: string; language: string; code: string }[] = [];
+		const regex = /```(\w+):([^\n]+)\n([\s\S]*?)```/g;
+		let match: RegExpExecArray | null;
+		while ((match = regex.exec(content)) !== null) {
+			results.push({
+				language: match[1],
+				filePath: match[2].trim(),
+				code: match[3],
+			});
+		}
+		return results;
+	}
+
+	private async _applyAgentEdits(content: string): Promise<void> {
+		const blocks = this._parseFileCodeBlocks(content);
+		if (blocks.length === 0) {
+			return;
+		}
+
+		const folders = this.workspaceContextService.getWorkspace().folders;
+		if (folders.length === 0) {
+			return;
+		}
+		const workspaceRoot = folders[0].uri;
+
+		for (const block of blocks) {
+			const fileUri = URI.joinPath(workspaceRoot, block.filePath);
+			try {
+				const exists = await this.fileService.exists(fileUri);
+				if (exists) {
+					// Read existing file to get its full range
+					const fileContent = await this.fileService.readFile(fileUri);
+					const text = fileContent.value.toString();
+					const lines = text.split('\n');
+					const fullRange = new Range(1, 1, lines.length, lines[lines.length - 1].length + 1);
+					await this.bulkEditService.apply([new ResourceTextEdit(fileUri, { range: fullRange, text: block.code })]);
+				} else {
+					await this.fileService.createFile(fileUri, VSBuffer.fromString(block.code));
+				}
+				await this.editorService.openEditor({ resource: fileUri });
+			} catch (error) {
+				console.error(`[GameDevChatService] Failed to apply agent edit to ${block.filePath}:`, error);
+			}
+		}
 	}
 
 	clearMessages(): void {

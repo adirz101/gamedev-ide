@@ -23,7 +23,8 @@ import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPan
 import { IViewDescriptorService } from '../../../common/views.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
-import { IChatMessage, IFileAttachment, IGameDevChatService, IStreamingChunkEvent, StreamingPhase } from './gamedevChatService.js';
+import { ChatMode, IChatMessage, IFileAttachment, IGameDevChatService, IStreamingChunkEvent, StreamingPhase } from './gamedevChatService.js';
+import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
 import { IUnityProjectService } from '../../gamedevUnity/common/types.js';
 import { IRenderedMarkdown } from '../../../../base/browser/markdownRenderer.js';
@@ -41,6 +42,13 @@ export class GameDevChatViewPane extends ViewPane {
 	private inputElement!: HTMLTextAreaElement;
 	private apiKeyModal: HTMLElement | undefined;
 	private contextBadge: HTMLElement | undefined;
+
+	// Toolbar state
+	private stopButton: HTMLElement | undefined;
+	private modeButton: HTMLButtonElement | undefined;
+	private modeButtonIcon: HTMLElement | undefined;
+	private modeButtonText: HTMLElement | undefined;
+	private rightToolsContainer: HTMLElement | undefined;
 
 	// Attachment state
 	private readonly attachments: IFileAttachment[] = [];
@@ -90,6 +98,7 @@ export class GameDevChatViewPane extends ViewPane {
 		@ISearchService private readonly searchService: ISearchService,
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 		@ILabelService private readonly labelService: ILabelService,
+		@IClipboardService private readonly clipboardService: IClipboardService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
@@ -112,6 +121,13 @@ export class GameDevChatViewPane extends ViewPane {
 		// Update context badge when analysis finishes
 		this._register(this.unityProjectService.onDidFinishAnalysis(() => this.updateContextBadge()));
 		this._register(this.unityProjectService.onDidDetectProject(() => this.updateContextBadge()));
+
+		// Stop button visibility
+		this._register(this.chatService.onDidStartStreaming(() => this.updateStopButton()));
+		this._register(this.chatService.onDidStopStreaming(() => this.updateStopButton()));
+
+		// Mode toggle sync
+		this._register(this.chatService.onDidChangeMode(() => this.updateModeButton()));
 	}
 
 	protected override renderBody(container: HTMLElement): void {
@@ -346,9 +362,9 @@ export class GameDevChatViewPane extends ViewPane {
 		const leftTools = append(toolbar, $('.left-tools'));
 		leftTools.style.cssText = 'display: flex; gap: 8px; align-items: center;';
 
-		const agentBtn = append(leftTools, $('button')) as HTMLButtonElement;
-		agentBtn.disabled = true;
-		agentBtn.style.cssText = `
+		// Mode toggle button (Ask / Agent)
+		this.modeButton = append(leftTools, $('button.gamedev-mode-btn')) as HTMLButtonElement;
+		this.modeButton.style.cssText = `
 			display: flex;
 			align-items: center;
 			gap: 4px;
@@ -358,40 +374,25 @@ export class GameDevChatViewPane extends ViewPane {
 			padding: 4px 10px;
 			border-radius: 4px;
 			font-size: 12px;
-			cursor: not-allowed;
-			opacity: 0.5;
+			cursor: pointer;
 		`;
-		const agentIcon = append(agentBtn, $('span'));
+		this.modeButtonIcon = append(this.modeButton, $('span'));
+		this.modeButtonIcon.style.fontSize = '14px';
+		this.modeButtonText = append(this.modeButton, $('span'));
+		const modeArrow = append(this.modeButton, $('span'));
 		// allow-any-unicode-next-line
-		agentIcon.textContent = '∞';
-		agentIcon.style.fontSize = '14px';
-		const agentText = append(agentBtn, $('span'));
-		agentText.textContent = 'Agent';
-		const agentArrow = append(agentBtn, $('span'));
-		// allow-any-unicode-next-line
-		agentArrow.textContent = '▾';
-		agentArrow.style.fontSize = '10px';
+		modeArrow.textContent = '▾';
+		modeArrow.style.fontSize = '10px';
+		this.updateModeButton();
 
-		const autoBtn = append(leftTools, $('button')) as HTMLButtonElement;
-		autoBtn.disabled = true;
-		autoBtn.style.cssText = `
-			display: flex;
-			align-items: center;
-			gap: 4px;
-			background: none;
-			border: none;
-			color: var(--vscode-foreground);
-			padding: 4px 8px;
-			font-size: 12px;
-			cursor: not-allowed;
-			opacity: 0.4;
-		`;
-		const autoText = append(autoBtn, $('span'));
-		autoText.textContent = 'Auto';
-		const autoArrow = append(autoBtn, $('span'));
-		// allow-any-unicode-next-line
-		autoArrow.textContent = '▾';
-		autoArrow.style.fontSize = '10px';
+		this.modeButton.addEventListener('click', () => {
+			const current = this.chatService.mode;
+			this.chatService.setMode(current === ChatMode.Ask ? ChatMode.Agent : ChatMode.Ask);
+		});
+
+		// Right tools container (stop button lives here)
+		this.rightToolsContainer = append(toolbar, $('.right-tools'));
+		this.rightToolsContainer.style.cssText = 'display: flex; gap: 8px; align-items: center;';
 
 		// Project context toggle button
 		const contextBtn = append(leftTools, $('button')) as HTMLButtonElement;
@@ -468,6 +469,105 @@ export class GameDevChatViewPane extends ViewPane {
 			badge.style.opacity = '0.4';
 			badge.title = 'No Unity project detected in workspace';
 			badge.style.pointerEvents = 'none';
+		}
+	}
+
+	private addCopyButtonsToCodeBlocks(container: HTMLElement, disposables: DisposableStore): void {
+		const preElements = container.querySelectorAll('pre');
+		for (const pre of preElements) {
+			// Skip if already has a copy button
+			if (pre.querySelector('.gamedev-code-copy-btn')) {
+				continue;
+			}
+
+			pre.style.position = 'relative';
+
+			const copyBtn = document.createElement('button');
+			copyBtn.className = 'gamedev-code-copy-btn';
+			copyBtn.textContent = 'Copy';
+			copyBtn.style.cssText = `
+				position: absolute;
+				top: 6px;
+				right: 6px;
+				background: var(--vscode-button-secondaryBackground);
+				color: var(--vscode-button-secondaryForeground);
+				border: none;
+				padding: 2px 8px;
+				border-radius: 3px;
+				font-size: 11px;
+				cursor: pointer;
+				opacity: 0;
+				transition: opacity 0.15s;
+				z-index: 1;
+			`;
+
+			pre.appendChild(copyBtn);
+
+			disposables.add(addDisposableListener(pre, 'mouseenter', () => {
+				copyBtn.style.opacity = '1';
+			}));
+			disposables.add(addDisposableListener(pre, 'mouseleave', () => {
+				copyBtn.style.opacity = '0';
+			}));
+			disposables.add(addDisposableListener(copyBtn, 'click', async () => {
+				const code = pre.querySelector('code');
+				const text = code ? code.textContent || '' : pre.textContent || '';
+				await this.clipboardService.writeText(text);
+				copyBtn.textContent = 'Copied!';
+				setTimeout(() => {
+					copyBtn.textContent = 'Copy';
+				}, 1500);
+			}));
+		}
+	}
+
+	private updateStopButton(): void {
+		if (this.chatService.isStreaming) {
+			if (!this.stopButton && this.rightToolsContainer) {
+				this.stopButton = append(this.rightToolsContainer, $('button.gamedev-stop-btn'));
+				this.stopButton.style.cssText = `
+					display: flex;
+					align-items: center;
+					gap: 4px;
+					background: var(--vscode-button-secondaryBackground);
+					border: none;
+					color: var(--vscode-errorForeground);
+					padding: 4px 10px;
+					border-radius: 4px;
+					font-size: 12px;
+					cursor: pointer;
+				`;
+				// allow-any-unicode-next-line
+				const stopIcon = append(this.stopButton, $('span'));
+				stopIcon.textContent = '\u25A0';
+				stopIcon.style.fontSize = '10px';
+				const stopText = append(this.stopButton, $('span'));
+				stopText.textContent = 'Stop';
+				this.stopButton.addEventListener('click', () => this.chatService.stopStreaming());
+			}
+		} else {
+			if (this.stopButton) {
+				this.stopButton.remove();
+				this.stopButton = undefined;
+			}
+		}
+	}
+
+	private updateModeButton(): void {
+		if (!this.modeButtonIcon || !this.modeButtonText || !this.modeButton) {
+			return;
+		}
+		const mode = this.chatService.mode;
+		if (mode === ChatMode.Agent) {
+			// allow-any-unicode-next-line
+			this.modeButtonIcon.textContent = '\u221E';
+			this.modeButtonText.textContent = 'Agent';
+			this.modeButton.title = 'Agent mode: AI writes/edits files in your workspace. Click to switch to Ask mode.';
+		} else {
+			// allow-any-unicode-next-line
+			this.modeButtonIcon.textContent = '\u{1F4AC}';
+			this.modeButtonText.textContent = 'Ask';
+			this.modeButton.title = 'Ask mode: AI responds in chat with code to copy. Click to switch to Agent mode.';
 		}
 	}
 
@@ -767,6 +867,7 @@ export class GameDevChatViewPane extends ViewPane {
 
 		clearNode(this.streamingContentElement);
 		this.streamingContentElement.appendChild(rendered.element);
+		this.addCopyButtonsToCodeBlocks(this.streamingContentElement, this.streamingDisposables);
 
 		this.lastRenderedContent = content;
 	}
@@ -917,6 +1018,7 @@ export class GameDevChatViewPane extends ViewPane {
 					});
 					this.messageDisposables.add(rendered);
 					contentEl.appendChild(rendered.element);
+					this.addCopyButtonsToCodeBlocks(contentEl, this.messageDisposables);
 				}
 
 				// Actions row
