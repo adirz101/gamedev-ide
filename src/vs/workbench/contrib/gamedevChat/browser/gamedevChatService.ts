@@ -5,8 +5,12 @@
 
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
+import { URI } from '../../../../base/common/uri.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { FileAccess } from '../../../../base/common/network.js';
+import { dirname } from '../../../../base/common/resources.js';
 
 export interface ISendMessageOptions {
 	includeProjectContext?: boolean;
@@ -66,6 +70,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 
 	constructor(
 		@IStorageService private readonly storageService: IStorageService,
+		@IFileService private readonly fileService: IFileService,
 	) {
 		super();
 		this._loadMessages();
@@ -106,7 +111,47 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 	}
 
 	private _loadApiKey(): void {
-		this._apiKey = this.storageService.get(STORAGE_KEY_API_KEY, StorageScope.PROFILE);
+		// 1. Check storage (user-set key via settings UI)
+		const storedKey = this.storageService.get(STORAGE_KEY_API_KEY, StorageScope.PROFILE);
+		if (storedKey) {
+			this._apiKey = storedKey;
+			return;
+		}
+
+		// 2. Try loading from .env file asynchronously
+		this._loadApiKeyFromEnvFile();
+	}
+
+	private async _loadApiKeyFromEnvFile(): Promise<void> {
+		try {
+			const appRootUri = dirname(FileAccess.asFileUri(''));
+			const envFileUri = URI.joinPath(appRootUri, '.env');
+			const content = await this.fileService.readFile(envFileUri);
+			const text = content.value.toString();
+
+			for (const line of text.split('\n')) {
+				const trimmed = line.trim();
+				if (trimmed.startsWith('#') || !trimmed) {
+					continue;
+				}
+				const eqIndex = trimmed.indexOf('=');
+				if (eqIndex === -1) {
+					continue;
+				}
+				const key = trimmed.substring(0, eqIndex).trim();
+				if (key === 'ANTHROPIC_API_KEY') {
+					const value = trimmed.substring(eqIndex + 1).trim().replace(/^["']|["']$/g, '');
+					if (value) {
+						this._apiKey = value;
+						console.log('[GameDevChatService] API key loaded from .env file');
+						return;
+					}
+				}
+			}
+			console.log('[GameDevChatService] No ANTHROPIC_API_KEY found in .env file');
+		} catch (error) {
+			console.log('[GameDevChatService] Could not read .env file:', error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	setApiKey(apiKey: string): void {
@@ -169,7 +214,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		}
 	}
 
-	private async _streamResponse(assistantMessage: IChatMessage, includeContext: boolean): Promise<void> {
+	private async _streamResponse(assistantMessage: IChatMessage, _includeContext: boolean): Promise<void> {
 		// Build messages array for API
 		const apiMessages = this._messages
 			.filter(m => !m.isStreaming)

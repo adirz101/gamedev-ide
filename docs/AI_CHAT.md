@@ -161,7 +161,7 @@ PANEL_HIDDEN: false         // Show bottom panel by default
 
 ---
 
-## API Key Setup
+## API Key Setup (Development/POC)
 
 Create a `.env` file in the project root:
 
@@ -169,7 +169,101 @@ Create a `.env` file in the project root:
 ANTHROPIC_API_KEY=sk-ant-api03-xxxxx
 ```
 
-The service automatically loads this on startup.
+The service automatically loads this on startup from `process.env.ANTHROPIC_API_KEY`.
+
+---
+
+## Production API Key Handling (Future Implementation)
+
+For production deployment where users pay for the service (like Cursor), implement one of these approaches:
+
+### Option 1: Backend Proxy (Recommended)
+
+**Architecture:**
+```
+User → GameDev IDE → Your Backend Server → Anthropic API
+```
+
+**Implementation:**
+1. Create a backend service (Node.js, Python, etc.) that holds the API key securely
+2. Implement user authentication (OAuth, JWT, etc.)
+3. Create API endpoints that proxy requests to Anthropic
+4. Add rate limiting and usage tracking per user
+5. Implement billing/subscription system
+
+**Pros:**
+- API key never exposed to client
+- Full control over usage and billing
+- Can add custom features (caching, logging, etc.)
+
+**Cons:**
+- Requires backend infrastructure
+- Added latency
+- Server costs
+
+**Example endpoint:**
+```
+POST /api/chat
+Authorization: Bearer <user_token>
+Body: { messages: [...], model: "...", stream: true }
+```
+
+### Option 2: Secure Key Injection at Build Time
+
+**Architecture:**
+```
+Build Process → Inject encrypted key → Runtime decryption
+```
+
+**Implementation:**
+1. Store API key in secure CI/CD secrets
+2. Inject at build time via environment variables
+3. Optionally encrypt/obfuscate in the bundle
+4. Decrypt at runtime
+
+**Pros:**
+- Simpler infrastructure
+- No backend needed for basic usage
+
+**Cons:**
+- Key can be extracted from built app (security risk)
+- No per-user tracking
+- No billing integration
+
+### Option 3: License Key System
+
+**Architecture:**
+```
+User buys license → License includes API quota → Validate on use
+```
+
+**Implementation:**
+1. Sell license keys that include API credit
+2. License server validates usage
+3. Deduct from quota on each API call
+
+**Pros:**
+- One-time purchase model possible
+- No subscription needed
+
+**Cons:**
+- Complex license management
+- Need to handle quota exhaustion
+
+### Recommended Path
+
+For a Cursor-like business model:
+
+1. **Phase 1 (Current - POC):** Use `.env` file for development
+2. **Phase 2 (Beta):** Implement backend proxy with user accounts
+3. **Phase 3 (Production):** Add billing, usage dashboard, rate limits
+
+**Tech Stack Suggestion:**
+- Backend: Node.js + Express or Fastify
+- Auth: Auth0, Clerk, or custom JWT
+- Database: PostgreSQL for user data + usage logs
+- Payments: Stripe
+- Hosting: Vercel, Railway, or AWS
 
 ---
 
