@@ -1,0 +1,81 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/* Shimmer animation for thinking/loading labels */
+.gamedev-shimmer {
+	background: linear-gradient(
+		90deg,
+		var(--vscode-descriptionForeground) 0%,
+		var(--vscode-descriptionForeground) 30%,
+		var(--vscode-foreground) 50%,
+		var(--vscode-descriptionForeground) 70%,
+		var(--vscode-descriptionForeground) 100%
+	);
+	background-size: 400% 100%;
+	background-clip: text;
+	-webkit-background-clip: text;
+	-webkit-text-fill-color: transparent;
+	animation: gamedev-shimmer 2s linear infinite;
+}
+
+@keyframes gamedev-shimmer {
+	0% { background-position: 200% 50%; }
+	100% { background-position: -200% 50%; }
+}
+
+/* Pulsing dot for streaming status */
+.gamedev-pulse-dot {
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--vscode-textLink-foreground);
+	animation: gamedev-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes gamedev-pulse {
+	0%, 100% { opacity: 0.4; transform: scale(0.8); }
+	50% { opacity: 1; transform: scale(1.2); }
+}
+
+/* Prevent horizontal overflow in chat messages */
+.gamedev-chat-messages .message-content {
+	overflow-wrap: break-word;
+	word-break: break-word;
+	min-width: 0;
+}
+
+.gamedev-chat-messages .message-content pre {
+	overflow-x: auto;
+	max-width: 100%;
+}
+
+.gamedev-chat-messages .message-content code {
+	word-break: break-all;
+}
+
+.gamedev-chat-messages .chat-message {
+	min-width: 0;
+	max-width: 100%;
+}
+
+.gamedev-chat-messages .user-message {
+	overflow-wrap: break-word;
+	word-break: break-word;
+}
+
+/* Thinking section scrollbar */
+.gamedev-thinking-content::-webkit-scrollbar {
+	width: 4px;
+}
+
+.gamedev-thinking-content::-webkit-scrollbar-thumb {
+	background: var(--vscode-scrollbarSlider-background);
+	border-radius: 2px;
+}
+
+.gamedev-thinking-content::-webkit-scrollbar-thumb:hover {
+	background: var(--vscode-scrollbarSlider-hoverBackground);
+}

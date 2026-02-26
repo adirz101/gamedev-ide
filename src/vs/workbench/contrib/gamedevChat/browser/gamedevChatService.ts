@@ -13,6 +13,20 @@ import { FileAccess } from '../../../../base/common/network.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { IUnityProjectService } from '../../gamedevUnity/common/types.js';
 
+export const enum StreamingPhase {
+	None = 0,
+	LoadingContext = 1,
+	Thinking = 2,
+	Responding = 3,
+}
+
+export interface IStreamingChunkEvent {
+	readonly messageId: string;
+	readonly type: 'thinking_delta' | 'text_delta' | 'phase_change' | 'thinking_complete';
+	readonly text?: string;
+	readonly phase?: StreamingPhase;
+}
+
 export interface ISendMessageOptions {
 	includeProjectContext?: boolean;
 }
@@ -23,6 +37,9 @@ export interface IChatMessage {
 	content: string;
 	timestamp: number;
 	isStreaming?: boolean;
+	thinkingContent?: string;
+	thinkingDurationMs?: number;
+	streamingPhase?: StreamingPhase;
 }
 
 export interface IGameDevChatService {
@@ -31,7 +48,7 @@ export interface IGameDevChatService {
 	readonly onDidUpdateMessages: Event<void>;
 	readonly onDidStartStreaming: Event<void>;
 	readonly onDidStopStreaming: Event<void>;
-	readonly onDidReceiveChunk: Event<string>;
+	readonly onDidReceiveChunk: Event<IStreamingChunkEvent>;
 
 	readonly messages: IChatMessage[];
 	readonly isStreaming: boolean;
@@ -68,7 +85,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 	private readonly _onDidStopStreaming = this._register(new Emitter<void>());
 	readonly onDidStopStreaming = this._onDidStopStreaming.event;
 
-	private readonly _onDidReceiveChunk = this._register(new Emitter<string>());
+	private readonly _onDidReceiveChunk = this._register(new Emitter<IStreamingChunkEvent>());
 	readonly onDidReceiveChunk = this._onDidReceiveChunk.event;
 
 	constructor(
@@ -176,15 +193,11 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 	}
 
 	async sendMessage(content: string, options?: ISendMessageOptions): Promise<void> {
-		console.log('[GameDevChatService] sendMessage called, hasApiKey:', !!this._apiKey);
-
 		if (!this._apiKey) {
-			console.error('[GameDevChatService] No API key set');
 			throw new Error('API key not set. Please set your Anthropic API key in the chat settings.');
 		}
 
 		const shouldIncludeContext = options?.includeProjectContext ?? this._includeProjectContext;
-		console.log('[GameDevChatService] shouldIncludeContext:', shouldIncludeContext);
 
 		// Add user message
 		const userMessage: IChatMessage = {
@@ -208,6 +221,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			content: '',
 			timestamp: Date.now(),
 			isStreaming: true,
+			streamingPhase: StreamingPhase.LoadingContext,
 		};
 		this._messages.push(assistantMessage);
 		this._onDidUpdateMessages.fire();
@@ -215,9 +229,9 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		try {
 			await this._streamResponse(assistantMessage, shouldIncludeContext);
 		} catch (error) {
-			// Update assistant message with error
 			assistantMessage.content = `Error: ${error instanceof Error ? error.message : String(error)}`;
 			assistantMessage.isStreaming = false;
+			assistantMessage.streamingPhase = StreamingPhase.None;
 			this._onDidUpdateMessages.fire();
 		} finally {
 			this._isStreaming = false;
@@ -228,6 +242,8 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 
 	private async _streamResponse(assistantMessage: IChatMessage, includeContext: boolean): Promise<void> {
 		// Build messages array for API
+		// Note: thinking blocks require a signature for multi-turn which we don't store,
+		// so we only send the text content for previous assistant messages.
 		const apiMessages = this._messages
 			.filter(m => !m.isStreaming)
 			.map(m => ({
@@ -236,7 +252,6 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			}));
 
 		// Build system message as blocks for prompt caching
-		// Base prompt is tiny and always included
 		const systemBlocks: Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> = [
 			{
 				type: 'text',
@@ -244,8 +259,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			}
 		];
 
-		// Project context is sent as a CACHED block — Anthropic caches it
-		// after the first call, subsequent calls pay ~10% for cached tokens
+		// Project context is sent as a CACHED block
 		if (includeContext) {
 			const projectContext = this.unityProjectService.buildContextMessage();
 			if (projectContext) {
@@ -254,11 +268,18 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 					text: projectContext,
 					cache_control: { type: 'ephemeral' },
 				});
-				console.log('[GameDevChatService] Including cached project context');
 			}
 		}
 
-		// Make API request with streaming and prompt caching
+		// Fire loading context phase
+		this._onDidReceiveChunk.fire({
+			messageId: assistantMessage.id,
+			type: 'phase_change',
+			phase: StreamingPhase.LoadingContext,
+		});
+
+		// Make API request with streaming, prompt caching, and extended thinking
+		// Note: temperature cannot be set when thinking is enabled
 		const response = await fetch('https://api.anthropic.com/v1/messages', {
 			method: 'POST',
 			headers: {
@@ -266,14 +287,18 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 				'x-api-key': this._apiKey!,
 				'anthropic-version': '2023-06-01',
 				'anthropic-dangerous-direct-browser-access': 'true',
-				'anthropic-beta': 'prompt-caching-2024-07-31',
+				'anthropic-beta': 'prompt-caching-2024-07-31,interleaved-thinking-2025-05-14',
 			},
 			body: JSON.stringify({
 				model: 'claude-sonnet-4-20250514',
-				max_tokens: 4096,
+				max_tokens: 16000,
 				system: systemBlocks,
 				messages: apiMessages,
 				stream: true,
+				thinking: {
+					type: 'enabled',
+					budget_tokens: 10000,
+				},
 			}),
 		});
 
@@ -290,6 +315,11 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		const decoder = new TextDecoder();
 		let buffer = '';
 
+		// Extended thinking state tracking
+		let currentBlockType: 'thinking' | 'text' | null = null;
+		const thinkingStartTime = Date.now();
+		let thinkingFinalized = false;
+
 		while (true) {
 			const { done, value } = await reader.read();
 			if (done) {
@@ -301,32 +331,100 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			buffer = lines.pop() || '';
 
 			for (const line of lines) {
-				if (line.startsWith('data: ')) {
-					const data = line.slice(6);
-					if (data === '[DONE]') {
-						continue;
-					}
+				if (!line.startsWith('data: ')) {
+					continue;
+				}
+				const data = line.slice(6);
+				if (data === '[DONE]') {
+					continue;
+				}
 
-					try {
-						const parsed = JSON.parse(data);
-						if (parsed.type === 'content_block_delta' && parsed.delta?.type === 'text_delta') {
-							const text = parsed.delta.text;
-							assistantMessage.content += text;
-							this._onDidReceiveChunk.fire(text);
-							this._onDidUpdateMessages.fire();
-						} else if (parsed.type === 'message_stop') {
-							assistantMessage.isStreaming = false;
-							this._onDidUpdateMessages.fire();
+				try {
+					const parsed = JSON.parse(data);
+
+					switch (parsed.type) {
+						case 'content_block_start': {
+							const blockType = parsed.content_block?.type;
+							if (blockType === 'thinking') {
+								currentBlockType = 'thinking';
+								assistantMessage.streamingPhase = StreamingPhase.Thinking;
+								this._onDidReceiveChunk.fire({
+									messageId: assistantMessage.id,
+									type: 'phase_change',
+									phase: StreamingPhase.Thinking,
+								});
+							} else if (blockType === 'text') {
+								currentBlockType = 'text';
+								if (!thinkingFinalized) {
+									thinkingFinalized = true;
+									assistantMessage.thinkingDurationMs = Date.now() - thinkingStartTime;
+								}
+								assistantMessage.streamingPhase = StreamingPhase.Responding;
+								this._onDidReceiveChunk.fire({
+									messageId: assistantMessage.id,
+									type: 'phase_change',
+									phase: StreamingPhase.Responding,
+								});
+							}
+							break;
 						}
-					} catch {
-						// Ignore parse errors for incomplete chunks
+
+						case 'content_block_delta': {
+							if (parsed.delta?.type === 'thinking_delta') {
+								const thinkingText = parsed.delta.thinking;
+								assistantMessage.thinkingContent = (assistantMessage.thinkingContent || '') + thinkingText;
+								this._onDidReceiveChunk.fire({
+									messageId: assistantMessage.id,
+									type: 'thinking_delta',
+									text: thinkingText,
+								});
+							} else if (parsed.delta?.type === 'text_delta') {
+								const text = parsed.delta.text;
+								assistantMessage.content += text;
+								this._onDidReceiveChunk.fire({
+									messageId: assistantMessage.id,
+									type: 'text_delta',
+									text,
+								});
+							}
+							break;
+						}
+
+						case 'content_block_stop': {
+							if (currentBlockType === 'thinking') {
+								if (!thinkingFinalized) {
+									thinkingFinalized = true;
+									assistantMessage.thinkingDurationMs = Date.now() - thinkingStartTime;
+								}
+								this._onDidReceiveChunk.fire({
+									messageId: assistantMessage.id,
+									type: 'thinking_complete',
+								});
+							}
+							currentBlockType = null;
+							break;
+						}
+
+						case 'message_delta':
+						case 'message_stop': {
+							assistantMessage.isStreaming = false;
+							assistantMessage.streamingPhase = StreamingPhase.None;
+							if (!thinkingFinalized && assistantMessage.thinkingContent) {
+								assistantMessage.thinkingDurationMs = Date.now() - thinkingStartTime;
+							}
+							this._onDidUpdateMessages.fire();
+							break;
+						}
 					}
+				} catch {
+					// Ignore parse errors for incomplete chunks
 				}
 			}
 		}
 
 		// Finalize message
 		assistantMessage.isStreaming = false;
+		assistantMessage.streamingPhase = StreamingPhase.None;
 		this._onDidUpdateMessages.fire();
 	}
 

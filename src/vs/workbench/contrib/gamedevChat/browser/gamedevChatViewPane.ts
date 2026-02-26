@@ -3,10 +3,12 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { $, addDisposableListener, append, clearNode, EventType } from '../../../../base/browser/dom.js';
+import './media/gamedevChat.css';
+import { $, addDisposableListener, append, clearNode, EventType, getWindow } from '../../../../base/browser/dom.js';
 import { StandardKeyboardEvent } from '../../../../base/browser/keyboardEvent.js';
 import { KeyCode } from '../../../../base/common/keyCodes.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
+import { RunOnceScheduler } from '../../../../base/common/async.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
@@ -17,9 +19,10 @@ import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPan
 import { IViewDescriptorService } from '../../../common/views.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
-import { IChatMessage, IGameDevChatService } from './gamedevChatService.js';
+import { IChatMessage, IGameDevChatService, IStreamingChunkEvent, StreamingPhase } from './gamedevChatService.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
 import { IUnityProjectService } from '../../gamedevUnity/common/types.js';
+import { IRenderedMarkdown } from '../../../../base/browser/markdownRenderer.js';
 
 export class GameDevChatViewPane extends ViewPane {
 
@@ -31,6 +34,23 @@ export class GameDevChatViewPane extends ViewPane {
 	private contextBadge: HTMLElement | undefined;
 
 	private readonly messageDisposables = this._register(new DisposableStore());
+
+	// Streaming state for incremental rendering
+	private readonly streamingDisposables = this._register(new DisposableStore());
+	private streamingPhaseElement: HTMLElement | undefined;
+	private streamingThinkingElement: HTMLElement | undefined;
+	private streamingThinkingTextElement: HTMLElement | undefined;
+	private streamingThinkingLabelElement: HTMLElement | undefined;
+	private streamingThinkingTimerElement: HTMLElement | undefined;
+	private streamingThinkingTimerInterval: number | undefined;
+	private streamingContentElement: HTMLElement | undefined;
+	private streamingMarkdownResult: IRenderedMarkdown | undefined;
+	private lastRenderedAssistantContainer: HTMLElement | undefined;
+	private currentStreamingMessageId: string | undefined;
+	private lastRenderedContent = '';
+	private userHasScrolled = false;
+
+	private readonly markdownRenderScheduler: RunOnceScheduler;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -49,8 +69,16 @@ export class GameDevChatViewPane extends ViewPane {
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
-		// Listen to chat service events
-		this._register(this.chatService.onDidUpdateMessages(() => this.renderMessages()));
+		// Structural changes: message added/removed, streaming finished
+		this._register(this.chatService.onDidUpdateMessages(() => this.onStructuralUpdate()));
+
+		// Incremental streaming chunks
+		this._register(this.chatService.onDidReceiveChunk((chunk) => this.onStreamingChunk(chunk)));
+
+		// Throttled markdown re-render (300ms)
+		this.markdownRenderScheduler = this._register(new RunOnceScheduler(
+			() => this.updateStreamingMarkdown(), 300
+		));
 
 		// Update context badge when analysis finishes
 		this._register(this.unityProjectService.onDidFinishAnalysis(() => this.updateContextBadge()));
@@ -154,6 +182,7 @@ export class GameDevChatViewPane extends ViewPane {
 		this.messagesContainer.style.cssText = `
 			flex: 1;
 			overflow-y: auto;
+			overflow-x: hidden;
 			padding: 16px;
 			display: flex;
 			flex-direction: column;
@@ -309,7 +338,6 @@ export class GameDevChatViewPane extends ViewPane {
 		badge.textContent = '';
 
 		if (hasContext && isEnabled) {
-			// Active: project detected and context enabled
 			// allow-any-unicode-next-line
 			const icon = append(badge, $('span'));
 			icon.textContent = '\u{1F3AE}';
@@ -322,7 +350,6 @@ export class GameDevChatViewPane extends ViewPane {
 			badge.style.opacity = '1';
 			badge.title = `Project context enabled: ${projectName}\nClick to disable`;
 		} else if (hasContext && !isEnabled) {
-			// Available but disabled
 			// allow-any-unicode-next-line
 			const icon = append(badge, $('span'));
 			icon.textContent = '\u{1F3AE}';
@@ -335,7 +362,6 @@ export class GameDevChatViewPane extends ViewPane {
 			badge.style.opacity = '0.5';
 			badge.title = `Project context disabled: ${projectName}\nClick to enable`;
 		} else {
-			// No project detected
 			const label = append(badge, $('span'));
 			label.textContent = 'No project';
 			badge.style.background = 'none';
@@ -347,41 +373,323 @@ export class GameDevChatViewPane extends ViewPane {
 		}
 	}
 
+	// --- Structural updates (full re-render) ---
+
+	private onStructuralUpdate(): void {
+		const messages = this.chatService.messages;
+		const lastMessage = messages[messages.length - 1];
+
+		if (lastMessage?.isStreaming && this.currentStreamingMessageId !== lastMessage.id) {
+			// New streaming message just appeared — render all then set up streaming
+			this.renderMessages();
+			this.setupStreamingElements(lastMessage);
+		} else if (!lastMessage?.isStreaming) {
+			// Streaming finished or messages changed structurally
+			this.teardownStreamingElements();
+			this.renderMessages();
+		}
+	}
+
+	// --- Incremental streaming ---
+
+	private onStreamingChunk(chunk: IStreamingChunkEvent): void {
+		if (chunk.messageId !== this.currentStreamingMessageId) {
+			return;
+		}
+
+		switch (chunk.type) {
+			case 'phase_change':
+				this.updatePhaseIndicator(chunk.phase!);
+				break;
+			case 'thinking_delta':
+				this.appendThinkingText(chunk.text!);
+				break;
+			case 'thinking_complete':
+				this.finalizeThinking();
+				break;
+			case 'text_delta':
+				if (!this.markdownRenderScheduler.isScheduled()) {
+					this.markdownRenderScheduler.schedule();
+				}
+				break;
+		}
+
+		this.autoScrollToBottom();
+	}
+
+	private setupStreamingElements(message: IChatMessage): void {
+		this.teardownStreamingElements();
+		this.currentStreamingMessageId = message.id;
+		this.lastRenderedContent = '';
+		this.userHasScrolled = false;
+
+		// Use the assistant container tracked during renderMessage
+		const assistantContainer = this.lastRenderedAssistantContainer;
+		if (!assistantContainer) {
+			return;
+		}
+		// Clear the default "Thinking..." placeholder from renderMessage
+		clearNode(assistantContainer);
+
+		// Phase indicator
+		this.streamingPhaseElement = append(assistantContainer, $('.streaming-phase'));
+		this.streamingPhaseElement.style.cssText = `
+			font-size: 12px;
+			color: var(--vscode-descriptionForeground);
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			padding: 4px 0;
+		`;
+		this.updatePhaseIndicator(message.streamingPhase ?? StreamingPhase.LoadingContext);
+
+		// Thinking section (hidden until first thinking chunk)
+		this.streamingThinkingElement = append(assistantContainer, $('.thinking-section'));
+		this.streamingThinkingElement.style.display = 'none';
+
+		// Content area for text streaming
+		this.streamingContentElement = append(assistantContainer, $('.message-content'));
+		this.streamingContentElement.style.cssText = `
+			font-size: 13px;
+			line-height: 1.6;
+			color: var(--vscode-foreground);
+		`;
+
+		// Track user scroll to disable auto-scroll
+		this.streamingDisposables.add(addDisposableListener(this.messagesContainer, 'scroll', () => {
+			const { scrollTop, scrollHeight, clientHeight } = this.messagesContainer;
+			this.userHasScrolled = scrollHeight - scrollTop - clientHeight > 30;
+		}));
+	}
+
+	private teardownStreamingElements(): void {
+		this.streamingDisposables.clear();
+		if (this.streamingMarkdownResult) {
+			this.messageDisposables.add(this.streamingMarkdownResult);
+			this.streamingMarkdownResult = undefined;
+		}
+		if (this.streamingThinkingTimerInterval) {
+			getWindow(this.messagesContainer).clearInterval(this.streamingThinkingTimerInterval);
+			this.streamingThinkingTimerInterval = undefined;
+		}
+		if (this.markdownRenderScheduler.isScheduled()) {
+			this.markdownRenderScheduler.cancel();
+		}
+		this.streamingContentElement = undefined;
+		this.streamingThinkingElement = undefined;
+		this.streamingThinkingTextElement = undefined;
+		this.streamingThinkingLabelElement = undefined;
+		this.streamingThinkingTimerElement = undefined;
+		this.streamingPhaseElement = undefined;
+		this.currentStreamingMessageId = undefined;
+		this.lastRenderedContent = '';
+		this.userHasScrolled = false;
+	}
+
+	private updatePhaseIndicator(phase: StreamingPhase): void {
+		if (!this.streamingPhaseElement) {
+			return;
+		}
+		clearNode(this.streamingPhaseElement);
+
+		let text: string;
+		switch (phase) {
+			case StreamingPhase.LoadingContext:
+				text = 'Loading project context...';
+				break;
+			case StreamingPhase.Thinking:
+				text = 'Thinking...';
+				break;
+			case StreamingPhase.Responding:
+				// Hide phase indicator once responding — content speaks for itself
+				this.streamingPhaseElement.style.display = 'none';
+				return;
+			default:
+				this.streamingPhaseElement.style.display = 'none';
+				return;
+		}
+
+		this.streamingPhaseElement.style.display = 'flex';
+		const dot = append(this.streamingPhaseElement, $('span.gamedev-pulse-dot'));
+		dot.style.cssText = `
+			display: inline-block;
+			width: 6px;
+			height: 6px;
+			border-radius: 50%;
+			background: var(--vscode-textLink-foreground);
+		`;
+		const label = append(this.streamingPhaseElement, $('span.gamedev-shimmer'));
+		label.textContent = text;
+	}
+
+	private appendThinkingText(text: string): void {
+		if (!this.streamingThinkingElement) {
+			return;
+		}
+
+		// Build thinking UI on first chunk
+		if (this.streamingThinkingElement.style.display === 'none') {
+			this.streamingThinkingElement.style.display = 'block';
+			this.buildThinkingUI();
+		}
+
+		if (this.streamingThinkingTextElement) {
+			this.streamingThinkingTextElement.textContent += text;
+			// Auto-scroll thinking content to bottom
+			this.streamingThinkingTextElement.scrollTop = this.streamingThinkingTextElement.scrollHeight;
+		}
+	}
+
+	private buildThinkingUI(): void {
+		if (!this.streamingThinkingElement) {
+			return;
+		}
+		clearNode(this.streamingThinkingElement);
+
+		this.streamingThinkingElement.style.cssText = `
+			border: 1px solid var(--vscode-panel-border);
+			border-radius: 6px;
+			margin-bottom: 8px;
+			overflow: hidden;
+		`;
+
+		// Header
+		const header = append(this.streamingThinkingElement, $('.thinking-header'));
+		header.style.cssText = `
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			padding: 6px 10px;
+			cursor: pointer;
+			font-size: 12px;
+			color: var(--vscode-descriptionForeground);
+			user-select: none;
+		`;
+
+		const chevron = append(header, $('span.thinking-chevron'));
+		// allow-any-unicode-next-line
+		chevron.textContent = '▶';
+		chevron.style.cssText = `
+			font-size: 8px;
+			transition: transform 0.15s;
+		`;
+
+		const label = append(header, $('span.gamedev-shimmer'));
+		label.textContent = 'Thinking';
+		this.streamingThinkingLabelElement = label;
+
+		this.streamingThinkingTimerElement = append(header, $('span.thinking-timer'));
+		this.streamingThinkingTimerElement.style.cssText = `
+			margin-left: auto;
+			font-size: 11px;
+			color: var(--vscode-descriptionForeground);
+			opacity: 0.7;
+		`;
+		const startTime = Date.now();
+		this.streamingThinkingTimerElement.textContent = '0s';
+
+		const targetWindow = getWindow(this.streamingThinkingElement);
+		this.streamingThinkingTimerInterval = targetWindow.setInterval(() => {
+			if (this.streamingThinkingTimerElement) {
+				const elapsed = Math.floor((Date.now() - startTime) / 1000);
+				this.streamingThinkingTimerElement.textContent = `${elapsed}s`;
+			}
+		}, 1000);
+
+		// Collapsible content area (starts collapsed)
+		const contentArea = append(this.streamingThinkingElement, $('div.gamedev-thinking-content'));
+		contentArea.style.cssText = `
+			padding: 8px 10px;
+			font-size: 12px;
+			line-height: 1.5;
+			color: var(--vscode-descriptionForeground);
+			max-height: 200px;
+			overflow-y: auto;
+			white-space: pre-wrap;
+			word-break: break-word;
+			display: none;
+		`;
+		this.streamingThinkingTextElement = contentArea;
+
+		// Toggle collapse
+		this.streamingDisposables.add(addDisposableListener(header, EventType.CLICK, () => {
+			const isCollapsed = contentArea.style.display === 'none';
+			contentArea.style.display = isCollapsed ? 'block' : 'none';
+			chevron.style.transform = isCollapsed ? 'rotate(90deg)' : 'rotate(0deg)';
+		}));
+	}
+
+	private finalizeThinking(): void {
+		if (this.streamingThinkingTimerInterval) {
+			getWindow(this.messagesContainer).clearInterval(this.streamingThinkingTimerInterval);
+			this.streamingThinkingTimerInterval = undefined;
+		}
+
+		// Update label from "Thinking" to "Thought for Xs"
+		const messages = this.chatService.messages;
+		const lastMessage = messages[messages.length - 1];
+		if (this.streamingThinkingLabelElement) {
+			this.streamingThinkingLabelElement.classList.remove('gamedev-shimmer');
+			const seconds = lastMessage?.thinkingDurationMs
+				? Math.ceil(lastMessage.thinkingDurationMs / 1000)
+				: 0;
+			this.streamingThinkingLabelElement.textContent = seconds > 0 ? `Thought for ${seconds}s` : 'Thought';
+		}
+	}
+
+	private updateStreamingMarkdown(): void {
+		if (!this.streamingContentElement) {
+			return;
+		}
+
+		const messages = this.chatService.messages;
+		const lastMessage = messages[messages.length - 1];
+		if (!lastMessage || lastMessage.id !== this.currentStreamingMessageId) {
+			return;
+		}
+
+		const content = lastMessage.content;
+		if (!content || content === this.lastRenderedContent) {
+			return;
+		}
+
+		// Dispose previous markdown render
+		if (this.streamingMarkdownResult) {
+			this.streamingMarkdownResult.dispose();
+			this.streamingMarkdownResult = undefined;
+		}
+
+		// Render with fillInIncompleteTokens for partial markdown
+		const rendered = this.markdownRendererService.render(
+			{ value: content, isTrusted: false },
+			{ fillInIncompleteTokens: true },
+		);
+		this.streamingDisposables.add(rendered);
+		this.streamingMarkdownResult = rendered;
+
+		clearNode(this.streamingContentElement);
+		this.streamingContentElement.appendChild(rendered.element);
+
+		this.lastRenderedContent = content;
+	}
+
+	private autoScrollToBottom(): void {
+		if (!this.userHasScrolled && this.messagesContainer) {
+			this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+		}
+	}
+
+	// --- Static message rendering ---
+
 	private renderMessages(): void {
 		this.messageDisposables.clear();
 		clearNode(this.messagesContainer);
+		this.lastRenderedAssistantContainer = undefined;
 
 		const messages = this.chatService.messages;
 
 		if (messages.length === 0) {
-			// Welcome state
-			const welcomeContainer = append(this.messagesContainer, $('.welcome-container'));
-			welcomeContainer.style.cssText = `
-				display: flex;
-				flex-direction: column;
-				align-items: center;
-				justify-content: center;
-				height: 100%;
-				text-align: center;
-				padding: 20px;
-			`;
-
-			const welcomeTitle = append(welcomeContainer, $('h2'));
-			welcomeTitle.textContent = 'Welcome to GameDev IDE';
-			welcomeTitle.style.cssText = `
-				font-size: 18px;
-				font-weight: 600;
-				color: var(--vscode-foreground);
-				margin: 0 0 8px 0;
-			`;
-
-			const welcomeSubtitle = append(welcomeContainer, $('p'));
-			welcomeSubtitle.textContent = 'Ask me anything about your code or game development.';
-			welcomeSubtitle.style.cssText = `
-				font-size: 13px;
-				color: var(--vscode-descriptionForeground);
-				margin: 0;
-			`;
+			this.renderWelcome();
 			return;
 		}
 
@@ -389,18 +697,49 @@ export class GameDevChatViewPane extends ViewPane {
 			this.renderMessage(message);
 		}
 
-		// Scroll to bottom
-		this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+		// Scroll to bottom (for non-streaming)
+		if (!this.chatService.isStreaming) {
+			this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+		}
+	}
+
+	private renderWelcome(): void {
+		const welcomeContainer = append(this.messagesContainer, $('.welcome-container'));
+		welcomeContainer.style.cssText = `
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			height: 100%;
+			text-align: center;
+			padding: 20px;
+		`;
+
+		const welcomeTitle = append(welcomeContainer, $('h2'));
+		welcomeTitle.textContent = 'Welcome to GameDev IDE';
+		welcomeTitle.style.cssText = `
+			font-size: 18px;
+			font-weight: 600;
+			color: var(--vscode-foreground);
+			margin: 0 0 8px 0;
+		`;
+
+		const welcomeSubtitle = append(welcomeContainer, $('p'));
+		welcomeSubtitle.textContent = 'Ask me anything about your code or game development.';
+		welcomeSubtitle.style.cssText = `
+			font-size: 13px;
+			color: var(--vscode-descriptionForeground);
+			margin: 0;
+		`;
 	}
 
 	private renderMessage(message: IChatMessage): void {
 		const isUser = message.role === 'user';
 
 		const messageEl = append(this.messagesContainer, $('.chat-message'));
-		messageEl.style.cssText = `display: flex; flex-direction: column; gap: 8px;`;
+		messageEl.style.cssText = 'display: flex; flex-direction: column; gap: 8px;';
 
 		if (isUser) {
-			// User message - simple box style like Cursor
 			const userBox = append(messageEl, $('.user-message'));
 			userBox.style.cssText = `
 				background: var(--vscode-input-background);
@@ -412,12 +751,12 @@ export class GameDevChatViewPane extends ViewPane {
 			`;
 			userBox.textContent = message.content;
 		} else {
-			// Assistant message - Cursor style with status
 			const assistantContainer = append(messageEl, $('.assistant-message'));
-			assistantContainer.style.cssText = `display: flex; flex-direction: column; gap: 4px;`;
+			assistantContainer.style.cssText = 'display: flex; flex-direction: column; gap: 4px;';
+			this.lastRenderedAssistantContainer = assistantContainer;
 
-			// Status line
 			if (message.isStreaming) {
+				// Streaming placeholder — setupStreamingElements will replace this
 				const statusLine = append(assistantContainer, $('.status-line'));
 				statusLine.style.cssText = `
 					font-size: 12px;
@@ -426,56 +765,122 @@ export class GameDevChatViewPane extends ViewPane {
 					align-items: center;
 					gap: 8px;
 				`;
-				const statusText = append(statusLine, $('span'));
-				statusText.textContent = 'Thinking...';
-				statusText.style.color = 'var(--vscode-textLink-foreground)';
-			}
-
-			// Message content
-			const contentEl = append(assistantContainer, $('.message-content'));
-			contentEl.style.cssText = `
-				font-size: 13px;
-				line-height: 1.6;
-				color: var(--vscode-foreground);
-			`;
-
-			if (message.content) {
-				const rendered = this.markdownRendererService.render({
-					value: message.content,
-					isTrusted: false,
-				});
-				this.messageDisposables.add(rendered);
-				contentEl.appendChild(rendered.element);
-			}
-
-			// Actions row (three dots menu)
-			if (!message.isStreaming && message.content) {
-				const actionsRow = append(assistantContainer, $('.actions-row'));
-				actionsRow.style.cssText = `
-					display: flex;
-					justify-content: flex-end;
-					opacity: 0.5;
+				const dot = append(statusLine, $('span.gamedev-pulse-dot'));
+				dot.style.cssText = `
+					display: inline-block;
+					width: 6px;
+					height: 6px;
+					border-radius: 50%;
+					background: var(--vscode-textLink-foreground);
 				`;
-				const moreBtn = append(actionsRow, $('button'));
-				moreBtn.textContent = '⋯';
-				moreBtn.style.cssText = `
-					background: none;
-					border: none;
-					color: var(--vscode-foreground);
-					cursor: pointer;
-					font-size: 14px;
-					padding: 2px 6px;
-				`;
+				const statusText = append(statusLine, $('span.gamedev-shimmer'));
+				statusText.textContent = 'Preparing...';
+			} else {
+				// Completed message — show thinking section if present
+				if (message.thinkingContent) {
+					this.renderThinkingSection(assistantContainer, message);
+				}
+
+				// Message content (markdown)
+				if (message.content) {
+					const contentEl = append(assistantContainer, $('.message-content'));
+					contentEl.style.cssText = `
+						font-size: 13px;
+						line-height: 1.6;
+						color: var(--vscode-foreground);
+					`;
+
+					const rendered = this.markdownRendererService.render({
+						value: message.content,
+						isTrusted: false,
+					});
+					this.messageDisposables.add(rendered);
+					contentEl.appendChild(rendered.element);
+				}
+
+				// Actions row
+				if (message.content) {
+					const actionsRow = append(assistantContainer, $('.actions-row'));
+					actionsRow.style.cssText = `
+						display: flex;
+						justify-content: flex-end;
+						opacity: 0.5;
+					`;
+					const moreBtn = append(actionsRow, $('button'));
+					moreBtn.textContent = '⋯';
+					moreBtn.style.cssText = `
+						background: none;
+						border: none;
+						color: var(--vscode-foreground);
+						cursor: pointer;
+						font-size: 14px;
+						padding: 2px 6px;
+					`;
+				}
 			}
 		}
 	}
 
+	private renderThinkingSection(container: HTMLElement, message: IChatMessage): void {
+		const section = append(container, $('.thinking-section-static'));
+		section.style.cssText = `
+			border: 1px solid var(--vscode-panel-border);
+			border-radius: 6px;
+			margin-bottom: 8px;
+			overflow: hidden;
+		`;
+
+		const header = append(section, $('.thinking-header'));
+		header.style.cssText = `
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			padding: 6px 10px;
+			cursor: pointer;
+			font-size: 12px;
+			color: var(--vscode-descriptionForeground);
+			user-select: none;
+		`;
+
+		const chevron = append(header, $('span'));
+		// allow-any-unicode-next-line
+		chevron.textContent = '▶';
+		chevron.style.cssText = 'font-size: 8px; transition: transform 0.15s;';
+
+		const durationSec = message.thinkingDurationMs
+			? Math.ceil(message.thinkingDurationMs / 1000)
+			: 0;
+		const label = append(header, $('span'));
+		label.textContent = durationSec > 0
+			? `Thought for ${durationSec}s`
+			: 'Thought';
+
+		const contentArea = append(section, $('div.gamedev-thinking-content'));
+		contentArea.style.cssText = `
+			padding: 8px 10px;
+			font-size: 12px;
+			line-height: 1.5;
+			color: var(--vscode-descriptionForeground);
+			max-height: 200px;
+			overflow-y: auto;
+			white-space: pre-wrap;
+			word-break: break-word;
+			display: none;
+		`;
+		contentArea.textContent = message.thinkingContent || '';
+
+		this.messageDisposables.add(addDisposableListener(header, EventType.CLICK, () => {
+			const isCollapsed = contentArea.style.display === 'none';
+			contentArea.style.display = isCollapsed ? 'block' : 'none';
+			chevron.style.transform = isCollapsed ? 'rotate(90deg)' : 'rotate(0deg)';
+		}));
+	}
+
+	// --- User actions ---
+
 	private async sendMessage(): Promise<void> {
 		const content = this.inputElement.value.trim();
-		console.log('[GameDevChatViewPane] sendMessage called with content:', content?.substring(0, 50), 'isStreaming:', this.chatService.isStreaming);
-
 		if (!content || this.chatService.isStreaming) {
-			console.log('[GameDevChatViewPane] Skipping send - empty content or already streaming');
 			return;
 		}
 
@@ -483,17 +888,13 @@ export class GameDevChatViewPane extends ViewPane {
 		this.inputElement.style.height = 'auto';
 
 		try {
-			console.log('[GameDevChatViewPane] Calling chatService.sendMessage...');
 			await this.chatService.sendMessage(content);
-			console.log('[GameDevChatViewPane] sendMessage completed');
 		} catch (error) {
 			console.error('[GameDevChatViewPane] sendMessage error:', error);
-			// Error is handled in service
 		}
 	}
 
 	private promptForApiKey(): void {
-		// Create a simple modal dialog for API key input
 		if (this.apiKeyModal) {
 			this.apiKeyModal.remove();
 			this.apiKeyModal = undefined;
@@ -592,19 +993,16 @@ export class GameDevChatViewPane extends ViewPane {
 			const apiKey = input.value.trim();
 			if (apiKey) {
 				this.chatService.setApiKey(apiKey);
-				console.log('[GameDevChatViewPane] API key saved');
 			}
 			closeModal();
 		});
 
-		// Close on click outside
 		modal.addEventListener('click', (e) => {
 			if (e.target === modal) {
 				closeModal();
 			}
 		});
 
-		// Focus the input
 		setTimeout(() => input.focus(), 0);
 	}
 
