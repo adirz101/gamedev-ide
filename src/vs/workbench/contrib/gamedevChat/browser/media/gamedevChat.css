@@ -79,3 +79,26 @@
 .gamedev-thinking-content::-webkit-scrollbar-thumb:hover {
 	background: var(--vscode-scrollbarSlider-hoverBackground);
 }
+
+/* @ mention popup scrollbar */
+.gamedev-mention-popup::-webkit-scrollbar {
+	width: 4px;
+}
+
+.gamedev-mention-popup::-webkit-scrollbar-thumb {
+	background: var(--vscode-scrollbarSlider-background);
+	border-radius: 2px;
+}
+
+.gamedev-mention-popup::-webkit-scrollbar-thumb:hover {
+	background: var(--vscode-scrollbarSlider-hoverBackground);
+}
+
+/* Attachment chip hover */
+.gamedev-attachment-chip:hover {
+	filter: brightness(1.15);
+}
+
+.gamedev-attachment-chip .gamedev-attachment-remove:hover {
+	opacity: 1 !important;
+}

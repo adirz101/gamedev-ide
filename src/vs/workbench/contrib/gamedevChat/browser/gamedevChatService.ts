@@ -27,8 +27,14 @@ export interface IStreamingChunkEvent {
 	readonly phase?: StreamingPhase;
 }
 
+export interface IFileAttachment {
+	readonly uri: URI;
+	readonly name: string;
+}
+
 export interface ISendMessageOptions {
 	includeProjectContext?: boolean;
+	attachments?: IFileAttachment[];
 }
 
 export interface IChatMessage {
@@ -40,6 +46,7 @@ export interface IChatMessage {
 	thinkingContent?: string;
 	thinkingDurationMs?: number;
 	streamingPhase?: StreamingPhase;
+	attachments?: IFileAttachment[];
 }
 
 export interface IGameDevChatService {
@@ -118,7 +125,16 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		const stored = this.storageService.get(STORAGE_KEY_MESSAGES, StorageScope.PROFILE);
 		if (stored) {
 			try {
-				this._messages = JSON.parse(stored);
+				const parsed: IChatMessage[] = JSON.parse(stored);
+				// Revive URI objects from stored JSON
+				for (const msg of parsed) {
+					if (msg.attachments) {
+						for (const attachment of msg.attachments) {
+							(attachment as { uri: URI }).uri = URI.revive(attachment.uri);
+						}
+					}
+				}
+				this._messages = parsed;
 			} catch {
 				this._messages = [];
 			}
@@ -198,13 +214,30 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		}
 
 		const shouldIncludeContext = options?.includeProjectContext ?? this._includeProjectContext;
+		const attachments = options?.attachments;
 
-		// Add user message
+		// Build augmented content with file attachments for the API
+		let augmentedContent: string | undefined;
+		if (attachments && attachments.length > 0) {
+			const fileBlocks: string[] = [];
+			for (const attachment of attachments) {
+				try {
+					const fileContent = await this.fileService.readFile(attachment.uri, { limits: { size: 100 * 1024 } });
+					fileBlocks.push(`--- ${attachment.uri.path} ---\n${fileContent.value.toString()}\n--- end ---`);
+				} catch (error) {
+					fileBlocks.push(`--- ${attachment.uri.path} ---\n[Error reading file: ${error instanceof Error ? error.message : String(error)}]\n--- end ---`);
+				}
+			}
+			augmentedContent = `[Attached files]\n${fileBlocks.join('\n')}\n\n${content}`;
+		}
+
+		// Add user message (display content only, not augmented)
 		const userMessage: IChatMessage = {
 			id: `user-${Date.now()}`,
 			role: 'user',
 			content,
 			timestamp: Date.now(),
+			attachments,
 		};
 		this._messages.push(userMessage);
 		this._onDidUpdateMessages.fire();
@@ -227,7 +260,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		this._onDidUpdateMessages.fire();
 
 		try {
-			await this._streamResponse(assistantMessage, shouldIncludeContext);
+			await this._streamResponse(assistantMessage, shouldIncludeContext, augmentedContent);
 		} catch (error) {
 			assistantMessage.content = `Error: ${error instanceof Error ? error.message : String(error)}`;
 			assistantMessage.isStreaming = false;
@@ -240,7 +273,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		}
 	}
 
-	private async _streamResponse(assistantMessage: IChatMessage, includeContext: boolean): Promise<void> {
+	private async _streamResponse(assistantMessage: IChatMessage, includeContext: boolean, augmentedContent?: string): Promise<void> {
 		// Build messages array for API
 		// Note: thinking blocks require a signature for multi-turn which we don't store,
 		// so we only send the text content for previous assistant messages.
@@ -250,6 +283,14 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 				role: m.role as 'user' | 'assistant',
 				content: m.content,
 			}));
+
+		// Replace the last user message content with augmented content (includes file attachments)
+		if (augmentedContent && apiMessages.length > 0) {
+			const lastMsg = apiMessages[apiMessages.length - 1];
+			if (lastMsg.role === 'user') {
+				lastMsg.content = augmentedContent;
+			}
+		}
 
 		// Build system message as blocks for prompt caching
 		const systemBlocks: Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> = [

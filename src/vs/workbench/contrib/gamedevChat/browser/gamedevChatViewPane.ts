@@ -4,11 +4,15 @@
  *--------------------------------------------------------------------------------------------*/
 
 import './media/gamedevChat.css';
-import { $, addDisposableListener, append, clearNode, EventType, getWindow } from '../../../../base/browser/dom.js';
+import { $, addDisposableListener, append, clearNode, DragAndDropObserver, EventType, getWindow } from '../../../../base/browser/dom.js';
+import { DataTransfers } from '../../../../base/browser/dnd.js';
 import { StandardKeyboardEvent } from '../../../../base/browser/keyboardEvent.js';
 import { KeyCode } from '../../../../base/common/keyCodes.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { RunOnceScheduler } from '../../../../base/common/async.js';
+import { URI } from '../../../../base/common/uri.js';
+import { basename } from '../../../../base/common/resources.js';
+import { CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
@@ -19,19 +23,36 @@ import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPan
 import { IViewDescriptorService } from '../../../common/views.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
-import { IChatMessage, IGameDevChatService, IStreamingChunkEvent, StreamingPhase } from './gamedevChatService.js';
+import { IChatMessage, IFileAttachment, IGameDevChatService, IStreamingChunkEvent, StreamingPhase } from './gamedevChatService.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
 import { IUnityProjectService } from '../../gamedevUnity/common/types.js';
 import { IRenderedMarkdown } from '../../../../base/browser/markdownRenderer.js';
+import { ISearchService, QueryType } from '../../../services/search/common/search.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
+import { ILabelService } from '../../../../platform/label/common/label.js';
+import { CodeDataTransfers, containsDragType, extractEditorsDropData } from '../../../../platform/dnd/browser/dnd.js';
 
 export class GameDevChatViewPane extends ViewPane {
 
 	private chatContainer!: HTMLElement;
 	private messagesContainer!: HTMLElement;
 	private inputContainer!: HTMLElement;
+	private inputWrapper!: HTMLElement;
 	private inputElement!: HTMLTextAreaElement;
 	private apiKeyModal: HTMLElement | undefined;
 	private contextBadge: HTMLElement | undefined;
+
+	// Attachment state
+	private readonly attachments: IFileAttachment[] = [];
+	private attachmentsContainer!: HTMLElement;
+
+	// @ mention popup state
+	private mentionPopup: HTMLElement | undefined;
+	private mentionItems: { uri: URI; name: string; label: string }[] = [];
+	private mentionSelectedIndex = 0;
+	private mentionSearchCts: CancellationTokenSource | undefined;
+	private mentionQuery = '';
+	private readonly mentionSearchScheduler: RunOnceScheduler;
 
 	private readonly messageDisposables = this._register(new DisposableStore());
 
@@ -66,6 +87,9 @@ export class GameDevChatViewPane extends ViewPane {
 		@IGameDevChatService private readonly chatService: IGameDevChatService,
 		@IMarkdownRendererService private readonly markdownRendererService: IMarkdownRendererService,
 		@IUnityProjectService private readonly unityProjectService: IUnityProjectService,
+		@ISearchService private readonly searchService: ISearchService,
+		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
+		@ILabelService private readonly labelService: ILabelService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
@@ -78,6 +102,11 @@ export class GameDevChatViewPane extends ViewPane {
 		// Throttled markdown re-render (300ms)
 		this.markdownRenderScheduler = this._register(new RunOnceScheduler(
 			() => this.updateStreamingMarkdown(), 300
+		));
+
+		// Debounced @ mention search (150ms)
+		this.mentionSearchScheduler = this._register(new RunOnceScheduler(
+			() => this.performMentionSearch(), 150
 		));
 
 		// Update context badge when analysis finishes
@@ -194,18 +223,29 @@ export class GameDevChatViewPane extends ViewPane {
 		this.inputContainer.style.cssText = `
 			padding: 12px;
 			border-top: 1px solid var(--vscode-panel-border);
+			position: relative;
 		`;
 
 		// Text input area
-		const inputWrapper = append(this.inputContainer, $('.input-wrapper'));
-		inputWrapper.style.cssText = `
+		this.inputWrapper = append(this.inputContainer, $('.input-wrapper'));
+		this.inputWrapper.style.cssText = `
 			background: var(--vscode-input-background);
 			border: 1px solid var(--vscode-input-border);
 			border-radius: 8px;
 			padding: 8px 12px;
+			position: relative;
 		`;
 
-		this.inputElement = append(inputWrapper, $('textarea')) as HTMLTextAreaElement;
+		// Attachments container (above textarea, inside inputWrapper)
+		this.attachmentsContainer = append(this.inputWrapper, $('.gamedev-attachments-container'));
+		this.attachmentsContainer.style.cssText = `
+			display: none;
+			flex-wrap: wrap;
+			gap: 4px;
+			margin-bottom: 6px;
+		`;
+
+		this.inputElement = append(this.inputWrapper, $('textarea')) as HTMLTextAreaElement;
 		this.inputElement.placeholder = 'Plan, @ for context, / for commands';
 		this.inputElement.style.cssText = `
 			width: 100%;
@@ -221,19 +261,77 @@ export class GameDevChatViewPane extends ViewPane {
 		`;
 		this.inputElement.rows = 1;
 
-		// Auto-resize textarea
+		// Auto-resize textarea + check @ mention trigger
 		this._register(addDisposableListener(this.inputElement, 'input', () => {
 			this.inputElement.style.height = 'auto';
 			this.inputElement.style.height = Math.min(this.inputElement.scrollHeight, 200) + 'px';
+			this.checkMentionTrigger();
 		}));
 
-		// Handle Enter key
+		// Handle Enter key + keyboard navigation for @ popup
 		this._register(addDisposableListener(this.inputElement, EventType.KEY_DOWN, (e: KeyboardEvent) => {
 			const event = new StandardKeyboardEvent(e);
+
+			// When popup is open, intercept navigation keys
+			if (this.mentionPopup) {
+				if (event.keyCode === KeyCode.DownArrow) {
+					e.preventDefault();
+					this.mentionSelectedIndex = Math.min(this.mentionSelectedIndex + 1, this.mentionItems.length - 1);
+					this.renderMentionPopupItems();
+					return;
+				}
+				if (event.keyCode === KeyCode.UpArrow) {
+					e.preventDefault();
+					this.mentionSelectedIndex = Math.max(this.mentionSelectedIndex - 1, 0);
+					this.renderMentionPopupItems();
+					return;
+				}
+				if (event.keyCode === KeyCode.Enter || event.keyCode === KeyCode.Tab) {
+					e.preventDefault();
+					this.acceptMentionItem();
+					return;
+				}
+				if (event.keyCode === KeyCode.Escape) {
+					e.preventDefault();
+					this.dismissMentionPopup();
+					return;
+				}
+			}
+
 			if (event.keyCode === KeyCode.Enter && !event.shiftKey) {
 				e.preventDefault();
 				this.sendMessage();
 			}
+		}));
+
+		// Drag-and-drop on input wrapper
+		this._register(new DragAndDropObserver(this.inputWrapper, {
+			onDragOver: (e) => {
+				if (containsDragType(e, DataTransfers.FILES, CodeDataTransfers.FILES, CodeDataTransfers.EDITORS)) {
+					e.preventDefault();
+					this.inputWrapper.style.borderColor = 'var(--vscode-focusBorder)';
+					this.inputWrapper.style.borderStyle = 'dashed';
+				}
+			},
+			onDragLeave: () => {
+				this.inputWrapper.style.borderColor = 'var(--vscode-input-border)';
+				this.inputWrapper.style.borderStyle = 'solid';
+			},
+			onDrop: async (e) => {
+				this.inputWrapper.style.borderColor = 'var(--vscode-input-border)';
+				this.inputWrapper.style.borderStyle = 'solid';
+
+				const editors = await extractEditorsDropData(e);
+				for (const editor of editors) {
+					if (editor.resource) {
+						this.addAttachment(editor.resource);
+					}
+				}
+			},
+			onDragEnd: () => {
+				this.inputWrapper.style.borderColor = 'var(--vscode-input-border)';
+				this.inputWrapper.style.borderStyle = 'solid';
+			},
 		}));
 
 		// Bottom toolbar
@@ -740,6 +838,29 @@ export class GameDevChatViewPane extends ViewPane {
 		messageEl.style.cssText = 'display: flex; flex-direction: column; gap: 8px;';
 
 		if (isUser) {
+			// Show attachment badges above user message
+			if (message.attachments && message.attachments.length > 0) {
+				const attachBadges = append(messageEl, $('.gamedev-msg-attachments'));
+				attachBadges.style.cssText = `
+					display: flex;
+					flex-wrap: wrap;
+					gap: 4px;
+				`;
+				for (const att of message.attachments) {
+					const badge = append(attachBadges, $('span.gamedev-msg-attachment-badge'));
+					badge.style.cssText = `
+						display: inline-flex;
+						align-items: center;
+						background: var(--vscode-badge-background);
+						color: var(--vscode-badge-foreground);
+						padding: 2px 6px;
+						border-radius: 4px;
+						font-size: 11px;
+					`;
+					badge.textContent = att.name;
+				}
+			}
+
 			const userBox = append(messageEl, $('.user-message'));
 			userBox.style.cssText = `
 				background: var(--vscode-input-background);
@@ -876,6 +997,261 @@ export class GameDevChatViewPane extends ViewPane {
 		}));
 	}
 
+	// --- Attachment management ---
+
+	private addAttachment(uri: URI): void {
+		// Avoid duplicates
+		if (this.attachments.some(a => a.uri.toString() === uri.toString())) {
+			return;
+		}
+		this.attachments.push({ uri, name: basename(uri) });
+		this.renderAttachmentChips();
+	}
+
+	private removeAttachment(uri: URI): void {
+		const index = this.attachments.findIndex(a => a.uri.toString() === uri.toString());
+		if (index >= 0) {
+			this.attachments.splice(index, 1);
+			this.renderAttachmentChips();
+		}
+	}
+
+	private clearAttachments(): void {
+		this.attachments.length = 0;
+		this.renderAttachmentChips();
+	}
+
+	private renderAttachmentChips(): void {
+		clearNode(this.attachmentsContainer);
+		if (this.attachments.length === 0) {
+			this.attachmentsContainer.style.display = 'none';
+			return;
+		}
+
+		this.attachmentsContainer.style.display = 'flex';
+		for (const attachment of this.attachments) {
+			const chip = append(this.attachmentsContainer, $('.gamedev-attachment-chip'));
+			chip.style.cssText = `
+				display: inline-flex;
+				align-items: center;
+				gap: 4px;
+				background: var(--vscode-badge-background);
+				color: var(--vscode-badge-foreground);
+				padding: 2px 6px;
+				border-radius: 4px;
+				font-size: 11px;
+				max-width: 180px;
+			`;
+
+			const nameSpan = append(chip, $('span'));
+			nameSpan.textContent = attachment.name;
+			nameSpan.style.cssText = 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
+
+			const removeBtn = append(chip, $('span.gamedev-attachment-remove'));
+			// allow-any-unicode-next-line
+			removeBtn.textContent = '\u00D7';
+			removeBtn.style.cssText = `
+				cursor: pointer;
+				font-size: 14px;
+				line-height: 1;
+				opacity: 0.7;
+				flex-shrink: 0;
+			`;
+			removeBtn.addEventListener('click', () => this.removeAttachment(attachment.uri));
+		}
+	}
+
+	// --- @ mention popup ---
+
+	private checkMentionTrigger(): void {
+		const value = this.inputElement.value;
+		const cursorPos = this.inputElement.selectionStart ?? value.length;
+
+		// Look backwards from cursor for an unmatched @
+		const textBeforeCursor = value.substring(0, cursorPos);
+		const atIndex = textBeforeCursor.lastIndexOf('@');
+
+		if (atIndex === -1 || (atIndex > 0 && textBeforeCursor[atIndex - 1] !== ' ' && textBeforeCursor[atIndex - 1] !== '\n')) {
+			// No @ or @ is not at word boundary
+			this.dismissMentionPopup();
+			return;
+		}
+
+		const query = textBeforeCursor.substring(atIndex + 1);
+
+		// If there's a space after query started, dismiss (user moved on)
+		if (query.includes(' ')) {
+			this.dismissMentionPopup();
+			return;
+		}
+
+		// Show popup and search
+		this.showMentionPopup(query);
+	}
+
+	private showMentionPopup(query: string): void {
+		if (!this.mentionPopup) {
+			this.mentionPopup = append(this.inputContainer, $('.gamedev-mention-popup'));
+			this.mentionPopup.style.cssText = `
+				position: absolute;
+				bottom: 100%;
+				left: 0;
+				right: 0;
+				max-height: 250px;
+				overflow-y: auto;
+				background: var(--vscode-editorSuggestWidget-background, var(--vscode-editor-background));
+				border: 1px solid var(--vscode-editorSuggestWidget-border, var(--vscode-panel-border));
+				border-radius: 6px;
+				margin-bottom: 4px;
+				z-index: 100;
+				box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+			`;
+		}
+
+		// Cancel previous search
+		this.mentionSearchCts?.cancel();
+		this.mentionSearchCts?.dispose();
+		this.mentionSearchCts = new CancellationTokenSource();
+
+		// Store query for the scheduler
+		this.mentionQuery = query;
+		this.mentionSearchScheduler.schedule();
+	}
+
+	private async performMentionSearch(): Promise<void> {
+		const query = this.mentionQuery;
+		const cts = this.mentionSearchCts;
+		if (!cts) {
+			return;
+		}
+
+		try {
+			const folders = this.workspaceContextService.getWorkspace().folders;
+			if (folders.length === 0) {
+				this.mentionItems = [];
+				this.renderMentionPopupItems();
+				return;
+			}
+
+			const results = await this.searchService.fileSearch({
+				type: QueryType.File,
+				filePattern: query || undefined,
+				maxResults: 15,
+				sortByScore: true,
+				folderQueries: folders.map(f => ({ folder: f.uri })),
+			}, cts.token);
+
+			if (cts.token.isCancellationRequested) {
+				return;
+			}
+
+			this.mentionItems = results.results.map(r => ({
+				uri: r.resource,
+				name: basename(r.resource),
+				label: this.labelService.getUriLabel(r.resource, { relative: true }),
+			}));
+			this.mentionSelectedIndex = 0;
+			this.renderMentionPopupItems();
+		} catch {
+			// Search cancelled or failed — ignore
+		}
+	}
+
+	private renderMentionPopupItems(): void {
+		if (!this.mentionPopup) {
+			return;
+		}
+		clearNode(this.mentionPopup);
+
+		if (this.mentionItems.length === 0) {
+			const emptyEl = append(this.mentionPopup, $('div.gamedev-mention-empty'));
+			emptyEl.textContent = 'No files found';
+			emptyEl.style.cssText = `
+				padding: 8px 12px;
+				font-size: 12px;
+				color: var(--vscode-descriptionForeground);
+			`;
+			return;
+		}
+
+		for (let i = 0; i < this.mentionItems.length; i++) {
+			const item = this.mentionItems[i];
+			const itemEl = append(this.mentionPopup, $('div.gamedev-mention-item'));
+			itemEl.style.cssText = `
+				padding: 6px 10px;
+				cursor: pointer;
+				display: flex;
+				flex-direction: column;
+				gap: 1px;
+				${i === this.mentionSelectedIndex ? 'background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground);' : ''}
+			`;
+
+			const nameEl = append(itemEl, $('span'));
+			nameEl.textContent = item.name;
+			nameEl.style.cssText = 'font-size: 12px; font-weight: 500;';
+
+			const pathEl = append(itemEl, $('span'));
+			pathEl.textContent = item.label;
+			pathEl.style.cssText = `
+				font-size: 11px;
+				opacity: 0.7;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			`;
+
+			itemEl.addEventListener('mouseenter', () => {
+				this.mentionSelectedIndex = i;
+				this.renderMentionPopupItems();
+			});
+			itemEl.addEventListener('click', () => {
+				this.mentionSelectedIndex = i;
+				this.acceptMentionItem();
+			});
+		}
+
+		// Scroll selected item into view
+		const selectedEl = this.mentionPopup.children[this.mentionSelectedIndex] as HTMLElement | undefined;
+		selectedEl?.scrollIntoView({ block: 'nearest' });
+	}
+
+	private acceptMentionItem(): void {
+		if (this.mentionSelectedIndex < 0 || this.mentionSelectedIndex >= this.mentionItems.length) {
+			return;
+		}
+
+		const item = this.mentionItems[this.mentionSelectedIndex];
+		const value = this.inputElement.value;
+		const cursorPos = this.inputElement.selectionStart ?? value.length;
+		const textBeforeCursor = value.substring(0, cursorPos);
+		const atIndex = textBeforeCursor.lastIndexOf('@');
+
+		if (atIndex >= 0) {
+			// Replace @query with @filename
+			const before = value.substring(0, atIndex);
+			const after = value.substring(cursorPos);
+			const insertText = `@${item.name} `;
+			this.inputElement.value = before + insertText + after;
+			this.inputElement.selectionStart = this.inputElement.selectionEnd = before.length + insertText.length;
+		}
+
+		this.addAttachment(item.uri);
+		this.dismissMentionPopup();
+		this.inputElement.focus();
+	}
+
+	private dismissMentionPopup(): void {
+		if (this.mentionPopup) {
+			this.mentionPopup.remove();
+			this.mentionPopup = undefined;
+		}
+		this.mentionItems = [];
+		this.mentionSelectedIndex = 0;
+		this.mentionSearchCts?.cancel();
+		this.mentionSearchCts?.dispose();
+		this.mentionSearchCts = undefined;
+	}
+
 	// --- User actions ---
 
 	private async sendMessage(): Promise<void> {
@@ -884,11 +1260,16 @@ export class GameDevChatViewPane extends ViewPane {
 			return;
 		}
 
+		// Capture attachments before clearing
+		const attachments = this.attachments.length > 0 ? [...this.attachments] : undefined;
+
 		this.inputElement.value = '';
 		this.inputElement.style.height = 'auto';
+		this.clearAttachments();
+		this.dismissMentionPopup();
 
 		try {
-			await this.chatService.sendMessage(content);
+			await this.chatService.sendMessage(content, { attachments });
 		} catch (error) {
 			console.error('[GameDevChatViewPane] sendMessage error:', error);
 		}
@@ -1010,5 +1391,10 @@ export class GameDevChatViewPane extends ViewPane {
 		super.layoutBody(height, width);
 		this.chatContainer.style.height = `${height}px`;
 		this.chatContainer.style.width = `${width}px`;
+	}
+
+	override dispose(): void {
+		this.dismissMentionPopup();
+		super.dispose();
 	}
 }
