@@ -5,6 +5,9 @@
 
 import { getUnitySkills, getUnitySkillsCompact } from './unitySkills.js';
 import { getGodotSkills, getGodotSkillsCompact } from './godotSkills.js';
+import { getUnityBridgeSkills } from './unityBridgeSkills.js';
+
+export { getUnityBridgeSkills };
 
 export const enum GameEngine {
 	Unknown = 'unknown',

@@ -13,7 +13,9 @@ import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContaine
 import { IViewContainersRegistry, IViewsRegistry, ViewContainerLocation, Extensions as ViewExtensions, IViewDescriptor } from '../../../common/views.js';
 import { ProjectKnowledgeViewPane } from './projectKnowledgeViewPane.js';
 import { IUnityProjectService } from '../common/types.js';
+import { IUnityBridgeService } from '../common/bridgeTypes.js';
 import { UnityProjectService } from './unityProjectService.js';
+import { UnityBridgeService } from './unityBridgeService.js';
 
 // View IDs
 export const GAMEDEV_PROJECT_VIEW_CONTAINER_ID = 'workbench.view.gamedevProject';
@@ -49,3 +51,6 @@ Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([project
 
 // Register the Unity Project Service
 registerSingleton(IUnityProjectService, UnityProjectService, InstantiationType.Delayed);
+
+// Register the Unity Bridge Service
+registerSingleton(IUnityBridgeService, UnityBridgeService, InstantiationType.Delayed);

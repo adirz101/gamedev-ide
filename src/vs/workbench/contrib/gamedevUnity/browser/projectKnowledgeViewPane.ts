@@ -16,11 +16,13 @@ import { IViewDescriptorService } from '../../../common/views.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { IUnityProjectService } from '../common/types.js';
+import { IUnityBridgeService, UnityBridgeConnectionState } from '../common/bridgeTypes.js';
 
 export class ProjectKnowledgeViewPane extends ViewPane {
 
 	private container!: HTMLElement;
 	private contentContainer!: HTMLElement;
+	private bridgeStatusElement: HTMLElement | undefined;
 	private readonly viewDisposables = this._register(new DisposableStore());
 
 	constructor(
@@ -35,6 +37,7 @@ export class ProjectKnowledgeViewPane extends ViewPane {
 		@IThemeService themeService: IThemeService,
 		@IHoverService hoverService: IHoverService,
 		@IUnityProjectService private readonly unityService: IUnityProjectService,
+		@IUnityBridgeService private readonly bridgeService: IUnityBridgeService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
@@ -57,6 +60,11 @@ export class ProjectKnowledgeViewPane extends ViewPane {
 			console.log('[ProjectKnowledgeViewPane] onDidFailAnalysis event received');
 			this.renderError();
 		}));
+
+		// Bridge connection state
+		this._register(this.bridgeService.onDidChangeConnectionState(() => {
+			this.updateBridgeStatus();
+		}));
 	}
 
 	protected override renderBody(container: HTMLElement): void {
@@ -70,6 +78,26 @@ export class ProjectKnowledgeViewPane extends ViewPane {
 			background: var(--vscode-sideBar-background);
 			overflow-y: auto;
 		`;
+
+		// Bridge connection status bar
+		this.bridgeStatusElement = append(this.container, $('.bridge-status'));
+		this.bridgeStatusElement.style.cssText = `
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			padding: 6px 12px;
+			font-size: 11px;
+			border-bottom: 1px solid var(--vscode-panel-border);
+			cursor: pointer;
+		`;
+		this.bridgeStatusElement.addEventListener('click', () => {
+			if (this.bridgeService.isConnected) {
+				this.bridgeService.disconnect();
+			} else {
+				this.bridgeService.connect();
+			}
+		});
+		this.updateBridgeStatus();
 
 		this.contentContainer = append(this.container, $('.content'));
 		this.contentContainer.style.cssText = `
@@ -92,6 +120,47 @@ export class ProjectKnowledgeViewPane extends ViewPane {
 			console.log('[ProjectKnowledgeViewPane] Second delayed updateContent check');
 			this.updateContent();
 		}, 6000); // After the 5s analysis timeout
+	}
+
+	private updateBridgeStatus(): void {
+		if (!this.bridgeStatusElement) {
+			return;
+		}
+		clearNode(this.bridgeStatusElement);
+
+		const state = this.bridgeService.connectionState;
+
+		// Status dot
+		const dot = append(this.bridgeStatusElement, $('span'));
+		dot.style.cssText = `
+			display: inline-block;
+			width: 8px;
+			height: 8px;
+			border-radius: 50%;
+			flex-shrink: 0;
+		`;
+
+		const label = append(this.bridgeStatusElement, $('span'));
+		label.style.cssText = 'flex: 1;';
+
+		switch (state) {
+			case UnityBridgeConnectionState.Connected:
+				dot.style.background = '#73c991';
+				label.textContent = 'Unity Editor connected';
+				this.bridgeStatusElement.title = 'Click to disconnect from Unity Editor';
+				break;
+			case UnityBridgeConnectionState.Connecting:
+			case UnityBridgeConnectionState.Reconnecting:
+				dot.style.background = '#cca700';
+				label.textContent = state === UnityBridgeConnectionState.Reconnecting ? 'Reconnecting...' : 'Connecting...';
+				this.bridgeStatusElement.title = 'Attempting to connect to Unity Editor';
+				break;
+			default:
+				dot.style.background = '#666';
+				label.textContent = 'Unity Editor disconnected';
+				this.bridgeStatusElement.title = 'Click to connect to Unity Editor\nMake sure GameDevIDEBridge.cs is in Assets/Editor/';
+				break;
+		}
 	}
 
 	private updateContent(): void {

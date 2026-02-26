@@ -13,11 +13,12 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../platfo
 import { FileAccess } from '../../../../base/common/network.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { IUnityProjectService } from '../../gamedevUnity/common/types.js';
-import { buildSkillsPromptBlock, GameEngine } from './skills/gamedevSkillsRegistry.js';
+import { buildSkillsPromptBlock, GameEngine, getUnityBridgeSkills } from './skills/gamedevSkillsRegistry.js';
 import { IBulkEditService, ResourceTextEdit } from '../../../../editor/browser/services/bulkEditService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { Range } from '../../../../editor/common/core/range.js';
+import { BridgeCommandCategory, IUnityBridgeService } from '../../gamedevUnity/common/bridgeTypes.js';
 
 export const enum StreamingPhase {
 	None = 0,
@@ -123,6 +124,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		@IBulkEditService private readonly bulkEditService: IBulkEditService,
 		@IEditorService private readonly editorService: IEditorService,
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
+		@IUnityBridgeService private readonly unityBridgeService: IUnityBridgeService,
 	) {
 		super();
 		this._loadMessages();
@@ -332,9 +334,12 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			this._isStreaming = false;
 			this._onDidStopStreaming.fire();
 
-			// In Agent mode, apply file edits from code blocks
+			// In Agent mode, apply file edits and bridge commands from code blocks
 			if (this._mode === ChatMode.Agent && assistantMessage.content) {
 				await this._applyAgentEdits(assistantMessage.content);
+				if (this.unityBridgeService.isConnected) {
+					await this._applyBridgeCommands(assistantMessage.content);
+				}
 			}
 
 			this._saveMessages();
@@ -398,6 +403,15 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 				type: 'text',
 				text: skillsBlock,
 				cache_control: { type: 'ephemeral' },
+			});
+		}
+
+		// Unity Bridge skills — when connected in Agent mode
+		if (this._mode === ChatMode.Agent && this.unityBridgeService.isConnected) {
+			const bridgeSkills = getUnityBridgeSkills();
+			systemBlocks.push({
+				type: 'text',
+				text: bridgeSkills,
 			});
 		}
 
@@ -569,6 +583,25 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		assistantMessage.isStreaming = false;
 		assistantMessage.streamingPhase = StreamingPhase.None;
 		this._onDidUpdateMessages.fire();
+	}
+
+	private async _applyBridgeCommands(content: string): Promise<void> {
+		const regex = /```unity-bridge\n([\s\S]*?)```/g;
+		let match: RegExpExecArray | null;
+		while ((match = regex.exec(content)) !== null) {
+			try {
+				const commands: Array<{ category: string; action: string; params?: Record<string, unknown> }> = JSON.parse(match[1]);
+				for (const cmd of commands) {
+					await this.unityBridgeService.sendCommand(
+						cmd.category as BridgeCommandCategory,
+						cmd.action,
+						cmd.params,
+					);
+				}
+			} catch (error) {
+				console.error('[GameDevChatService] Failed to execute bridge commands:', error);
+			}
+		}
 	}
 
 	private _parseFileCodeBlocks(content: string): { filePath: string; language: string; code: string }[] {
