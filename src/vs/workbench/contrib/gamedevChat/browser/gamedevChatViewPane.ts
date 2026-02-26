@@ -26,6 +26,7 @@ export class GameDevChatViewPane extends ViewPane {
 	private messagesContainer!: HTMLElement;
 	private inputContainer!: HTMLElement;
 	private inputElement!: HTMLTextAreaElement;
+	private apiKeyModal: HTMLElement | undefined;
 
 	private readonly messageDisposables = this._register(new DisposableStore());
 
@@ -112,6 +113,22 @@ export class GameDevChatViewPane extends ViewPane {
 			opacity: 0.7;
 		`;
 
+		// API Key settings button
+		const settingsBtn = append(headerActions, $('button'));
+		// allow-any-unicode-next-line
+		settingsBtn.textContent = '⚙';
+		settingsBtn.title = 'Set API Key';
+		settingsBtn.style.cssText = `
+			background: none;
+			border: none;
+			color: var(--vscode-foreground);
+			cursor: pointer;
+			font-size: 14px;
+			padding: 4px 8px;
+			opacity: 0.7;
+		`;
+		settingsBtn.addEventListener('click', () => this.promptForApiKey());
+
 		const moreBtn = append(headerActions, $('button'));
 		moreBtn.textContent = '⋯';
 		moreBtn.title = 'More';
@@ -195,7 +212,7 @@ export class GameDevChatViewPane extends ViewPane {
 		const leftTools = append(toolbar, $('.left-tools'));
 		leftTools.style.cssText = 'display: flex; gap: 8px; align-items: center;';
 
-		const agentBtn = append(leftTools, $('button'));
+		const agentBtn = append(leftTools, $('button')) as HTMLButtonElement;
 		agentBtn.disabled = true;
 		agentBtn.style.cssText = `
 			display: flex;
@@ -221,7 +238,7 @@ export class GameDevChatViewPane extends ViewPane {
 		agentArrow.textContent = '▾';
 		agentArrow.style.fontSize = '10px';
 
-		const autoBtn = append(leftTools, $('button'));
+		const autoBtn = append(leftTools, $('button')) as HTMLButtonElement;
 		autoBtn.disabled = true;
 		autoBtn.style.cssText = `
 			display: flex;
@@ -241,6 +258,34 @@ export class GameDevChatViewPane extends ViewPane {
 		// allow-any-unicode-next-line
 		autoArrow.textContent = '▾';
 		autoArrow.style.fontSize = '10px';
+
+		// Project context toggle
+		const contextToggle = append(leftTools, $('label'));
+		contextToggle.style.cssText = `
+			display: flex;
+			align-items: center;
+			gap: 4px;
+			font-size: 12px;
+			color: var(--vscode-foreground);
+			cursor: pointer;
+			user-select: none;
+			opacity: 0.8;
+		`;
+
+		const contextCheckbox = append(contextToggle, $('input')) as HTMLInputElement;
+		contextCheckbox.type = 'checkbox';
+		contextCheckbox.checked = this.chatService.includeProjectContext;
+		contextCheckbox.style.cssText = `
+			cursor: pointer;
+			accent-color: var(--vscode-focusBorder);
+		`;
+
+		const contextLabel = append(contextToggle, $('span'));
+		contextLabel.textContent = 'Project context';
+
+		this._register(addDisposableListener(contextCheckbox, 'change', () => {
+			this.chatService.setIncludeProjectContext(contextCheckbox.checked);
+		}));
 
 		// Initial render
 		this.renderMessages();
@@ -371,7 +416,10 @@ export class GameDevChatViewPane extends ViewPane {
 
 	private async sendMessage(): Promise<void> {
 		const content = this.inputElement.value.trim();
+		console.log('[GameDevChatViewPane] sendMessage called with content:', content?.substring(0, 50), 'isStreaming:', this.chatService.isStreaming);
+
 		if (!content || this.chatService.isStreaming) {
+			console.log('[GameDevChatViewPane] Skipping send - empty content or already streaming');
 			return;
 		}
 
@@ -379,10 +427,129 @@ export class GameDevChatViewPane extends ViewPane {
 		this.inputElement.style.height = 'auto';
 
 		try {
+			console.log('[GameDevChatViewPane] Calling chatService.sendMessage...');
 			await this.chatService.sendMessage(content);
+			console.log('[GameDevChatViewPane] sendMessage completed');
 		} catch (error) {
+			console.error('[GameDevChatViewPane] sendMessage error:', error);
 			// Error is handled in service
 		}
+	}
+
+	private promptForApiKey(): void {
+		// Create a simple modal dialog for API key input
+		if (this.apiKeyModal) {
+			this.apiKeyModal.remove();
+			this.apiKeyModal = undefined;
+		}
+
+		const modal = append(this.chatContainer, $('.api-key-modal'));
+		this.apiKeyModal = modal;
+		modal.style.cssText = `
+			position: absolute;
+			top: 0;
+			left: 0;
+			right: 0;
+			bottom: 0;
+			background: rgba(0, 0, 0, 0.5);
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			z-index: 1000;
+		`;
+
+		const dialog = append(modal, $('.api-key-dialog'));
+		dialog.style.cssText = `
+			background: var(--vscode-editor-background);
+			border: 1px solid var(--vscode-panel-border);
+			border-radius: 8px;
+			padding: 20px;
+			width: 300px;
+			display: flex;
+			flex-direction: column;
+			gap: 12px;
+		`;
+
+		const title = append(dialog, $('h3'));
+		title.textContent = 'Anthropic API Key';
+		title.style.cssText = `
+			margin: 0;
+			font-size: 14px;
+			font-weight: 600;
+			color: var(--vscode-foreground);
+		`;
+
+		const description = append(dialog, $('p'));
+		description.textContent = 'Enter your Anthropic API key to enable the AI chat.';
+		description.style.cssText = `
+			margin: 0;
+			font-size: 12px;
+			color: var(--vscode-descriptionForeground);
+		`;
+
+		const input = append(dialog, $('input')) as HTMLInputElement;
+		input.type = 'password';
+		input.placeholder = 'sk-ant-...';
+		input.value = this.chatService.getApiKey() || '';
+		input.style.cssText = `
+			background: var(--vscode-input-background);
+			border: 1px solid var(--vscode-input-border);
+			color: var(--vscode-input-foreground);
+			padding: 8px 12px;
+			border-radius: 4px;
+			font-size: 13px;
+		`;
+
+		const buttons = append(dialog, $('.buttons'));
+		buttons.style.cssText = 'display: flex; gap: 8px; justify-content: flex-end;';
+
+		const cancelBtn = append(buttons, $('button'));
+		cancelBtn.textContent = 'Cancel';
+		cancelBtn.style.cssText = `
+			background: var(--vscode-button-secondaryBackground);
+			color: var(--vscode-button-secondaryForeground);
+			border: none;
+			padding: 6px 12px;
+			border-radius: 4px;
+			cursor: pointer;
+			font-size: 12px;
+		`;
+		const closeModal = () => {
+			modal.remove();
+			this.apiKeyModal = undefined;
+		};
+
+		cancelBtn.addEventListener('click', closeModal);
+
+		const saveBtn = append(buttons, $('button'));
+		saveBtn.textContent = 'Save';
+		saveBtn.style.cssText = `
+			background: var(--vscode-button-background);
+			color: var(--vscode-button-foreground);
+			border: none;
+			padding: 6px 12px;
+			border-radius: 4px;
+			cursor: pointer;
+			font-size: 12px;
+		`;
+		saveBtn.addEventListener('click', () => {
+			const apiKey = input.value.trim();
+			if (apiKey) {
+				this.chatService.setApiKey(apiKey);
+				console.log('[GameDevChatViewPane] API key saved');
+			}
+			closeModal();
+		});
+
+		// Close on click outside
+		modal.addEventListener('click', (e) => {
+			if (e.target === modal) {
+				closeModal();
+			}
+		});
+
+		// Focus the input
+		setTimeout(() => input.focus(), 0);
 	}
 
 	protected override layoutBody(height: number, width: number): void {

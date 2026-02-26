@@ -112,7 +112,31 @@
 		"editor.minimap.enabled": false,
 		"workbench.tree.indent": 16,
 		"window.titleBarStyle": "custom",
-		"breadcrumbs.enabled": false
+		"breadcrumbs.enabled": false,
+		"files.associations": {
+			"*.unity": "yaml",
+			"*.prefab": "yaml",
+			"*.asset": "yaml",
+			"*.mat": "yaml",
+			"*.controller": "yaml",
+			"*.anim": "yaml",
+			"*.meta": "yaml"
+		},
+		"files.exclude": {
+			"**/.git": true,
+			"**/.svn": true,
+			"**/.hg": true,
+			"**/CVS": true,
+			"**/.DS_Store": true,
+			"**/Thumbs.db": true
+		},
+		"search.exclude": {
+			"**/Library": true,
+			"**/Temp": true,
+			"**/obj": true,
+			"**/Build": true,
+			"**/Builds": true
+		}
 	},
 	"defaultChatAgent": {
 		"extensionId": "",
