@@ -12,6 +12,7 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../platfo
 import { FileAccess } from '../../../../base/common/network.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { IUnityProjectService } from '../../gamedevUnity/common/types.js';
+import { buildSkillsPromptBlock, GameEngine } from './skills/gamedevSkillsRegistry.js';
 
 export const enum StreamingPhase {
 	None = 0,
@@ -296,9 +297,22 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		const systemBlocks: Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> = [
 			{
 				type: 'text',
-				text: 'You are a helpful AI assistant for game development. You help with Unity projects, C# scripting, game design, and general programming questions.',
+				text: 'You are an expert AI assistant for game development. You help with Unity, Godot, C#, GDScript, game design, architecture patterns, and general programming questions. Give accurate, production-quality advice. When writing code, follow engine best practices and avoid common pitfalls.',
 			}
 		];
+
+		// Engine skills knowledge base — sent as a CACHED block
+		const detectedEngine = this.unityProjectService.currentProject?.isUnityProject
+			? GameEngine.Unity
+			: GameEngine.Unknown;
+		const skillsBlock = buildSkillsPromptBlock(detectedEngine);
+		if (skillsBlock) {
+			systemBlocks.push({
+				type: 'text',
+				text: skillsBlock,
+				cache_control: { type: 'ephemeral' },
+			});
+		}
 
 		// Project context is sent as a CACHED block
 		if (includeContext) {
