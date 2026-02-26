@@ -15,7 +15,7 @@ import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPan
 import { IViewDescriptorService } from '../../../common/views.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
-import { IUnityProjectService } from './unityProjectService.js';
+import { IUnityProjectService } from '../common/types.js';
 
 export class ProjectKnowledgeViewPane extends ViewPane {
 

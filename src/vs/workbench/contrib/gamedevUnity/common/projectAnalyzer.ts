@@ -13,8 +13,6 @@ import {
 	MethodInfo,
 	ParameterInfo,
 	PropertyInfo,
-	AssetInfo,
-	SceneInfo,
 	ProjectKnowledgeExport,
 	UNITY_CALLBACKS,
 	IGNORED_FOLDERS,
@@ -383,59 +381,78 @@ export class ProjectAnalyzer {
 	}
 
 	/**
-	 * Build context message for AI
+	 * Build a compact context message for AI.
+	 * This is sent as a cached system block — keep it dense but informative.
+	 * Anthropic caches it so only the first call pays full token price.
 	 */
 	buildContextMessage(): string {
-		const data = this.exportForAI();
+		const lines: string[] = [];
 
-		let context = `You are an AI assistant helping with a Unity game development project.\n`;
-		context += `Project: ${data.projectName}\n\n`;
+		lines.push(`Unity project: "${this.knowledge.projectName}"`);
+		lines.push(`${this.knowledge.scenes.size} scenes, ${this.knowledge.scripts.size} scripts, ${this.knowledge.prefabs.size} prefabs, ${this.knowledge.assets.size} assets`);
+		lines.push('');
 
-		context += `## Project Overview\n`;
-		context += `- Scenes: ${data.overview.sceneCount}\n`;
-		context += `- Scripts: ${data.overview.scriptCount}\n`;
-		context += `- Prefabs: ${data.overview.prefabCount}\n`;
-		context += `- Total Assets: ${data.overview.assetCount}\n\n`;
-
-		if (data.scenes.length > 0) {
-			context += `## Scenes\n`;
-			for (const scene of data.scenes) {
-				context += `- ${scene.name}: ${scene.gameObjectCount} GameObjects (${scene.rootCount} root)\n`;
-			}
-			context += `\n`;
+		// Scenes — just names and counts, one line each
+		const scenes = Array.from(this.knowledge.scenes.values());
+		if (scenes.length > 0) {
+			lines.push('Scenes: ' + scenes.map(s => s.name).join(', '));
 		}
 
-		if (data.scripts.length > 0) {
-			context += `## Scripts\n`;
-			for (const script of data.scripts.slice(0, 10)) {
-				context += `- ${script.fileName}\n`;
+		// Scripts — compact class map: ClassName(MB) → key methods
+		const scripts = Array.from(this.knowledge.scripts.values());
+		if (scripts.length > 0) {
+			lines.push('');
+			lines.push('Scripts:');
+			for (const script of scripts) {
 				for (const cls of script.classes) {
-					const mbTag = cls.isMonoBehaviour ? ' (MonoBehaviour)' : '';
-					context += `  - Class: ${cls.name}${mbTag}\n`;
-					if (cls.methods.length > 0) {
-						context += `    Methods: ${cls.methods.join(', ')}\n`;
+					const parts: string[] = [];
+
+					// Class header
+					const mb = cls.isMonoBehaviour ? ' [MB]' : '';
+					const ext = cls.extends && !cls.isMonoBehaviour ? ` : ${cls.extends}` : '';
+					parts.push(`${cls.name}${mb}${ext}`);
+
+					// Public/serialized fields — compact
+					const visibleFields = cls.fields.filter(f => f.isSerializeField || f.accessModifier === 'public');
+					if (visibleFields.length > 0) {
+						parts.push('fields: ' + visibleFields.map(f => `${f.type} ${f.name}`).join(', '));
 					}
+
+					// Methods — just names, separate callbacks
+					const callbacks = cls.methods.filter(m => m.isUnityCallback).map(m => m.name);
+					const custom = cls.methods.filter(m => !m.isUnityCallback);
+					if (callbacks.length > 0) {
+						parts.push('callbacks: ' + callbacks.join(', '));
+					}
+					if (custom.length > 0) {
+						parts.push('methods: ' + custom.slice(0, 10).map(m => m.name).join(', '));
+					}
+
+					lines.push('- ' + parts.join(' | '));
 				}
 			}
-			if (data.scripts.length > 10) {
-				context += `  ... and ${data.scripts.length - 10} more scripts\n`;
-			}
-			context += `\n`;
 		}
 
-		if (data.prefabs.length > 0) {
-			context += `## Prefabs\n`;
-			for (const prefab of data.prefabs.slice(0, 10)) {
-				context += `- ${prefab}\n`;
-			}
-			if (data.prefabs.length > 10) {
-				context += `... and ${data.prefabs.length - 10} more prefabs\n`;
-			}
-			context += `\n`;
+		// Prefabs — just a list
+		const prefabs = Array.from(this.knowledge.prefabs.values());
+		if (prefabs.length > 0) {
+			lines.push('');
+			lines.push('Prefabs: ' + prefabs.map(p => p.fileName.replace('.prefab', '')).join(', '));
 		}
 
-		context += `Please help me work on this Unity project.\n`;
+		// Assets — counts by type only
+		const assetsByType = new Map<string, number>();
+		for (const asset of this.knowledge.assets.values()) {
+			assetsByType.set(asset.type, (assetsByType.get(asset.type) || 0) + 1);
+		}
+		if (assetsByType.size > 0) {
+			const assetParts: string[] = [];
+			for (const [type, count] of assetsByType) {
+				assetParts.push(`${count} ${type}`);
+			}
+			lines.push('Assets: ' + assetParts.join(', '));
+		}
 
-		return context;
+		return lines.join('\n');
 	}
 }

@@ -3,6 +3,34 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { Event } from '../../../../base/common/event.js';
+import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
+
+/**
+ * Unity Project Service Interface
+ * Lives in common/ so it can be imported by other contributions (e.g. gamedevChat).
+ */
+export interface IUnityProjectService {
+	readonly _serviceBrand: undefined;
+
+	readonly onDidDetectProject: Event<UnityProjectInfo>;
+	readonly onDidStartAnalysis: Event<void>;
+	readonly onDidFinishAnalysis: Event<ProjectKnowledge>;
+	readonly onDidFailAnalysis: Event<Error>;
+
+	readonly currentProject: UnityProjectInfo | undefined;
+	readonly projectKnowledge: ProjectKnowledge | undefined;
+	readonly isAnalyzing: boolean;
+
+	detectProject(folderPath: string): Promise<UnityProjectInfo>;
+	analyzeProject(): Promise<ProjectKnowledge | undefined>;
+	exportForAI(): ProjectKnowledgeExport | undefined;
+	buildContextMessage(): string | undefined;
+	refresh(): Promise<void>;
+}
+
+export const IUnityProjectService = createDecorator<IUnityProjectService>('unityProjectService');
+
 /**
  * Unity Project Detection
  */

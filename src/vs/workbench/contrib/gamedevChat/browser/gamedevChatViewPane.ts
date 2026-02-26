@@ -19,6 +19,7 @@ import { IConfigurationService } from '../../../../platform/configuration/common
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { IChatMessage, IGameDevChatService } from './gamedevChatService.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
+import { IUnityProjectService } from '../../gamedevUnity/common/types.js';
 
 export class GameDevChatViewPane extends ViewPane {
 
@@ -27,6 +28,7 @@ export class GameDevChatViewPane extends ViewPane {
 	private inputContainer!: HTMLElement;
 	private inputElement!: HTMLTextAreaElement;
 	private apiKeyModal: HTMLElement | undefined;
+	private contextBadge: HTMLElement | undefined;
 
 	private readonly messageDisposables = this._register(new DisposableStore());
 
@@ -43,11 +45,16 @@ export class GameDevChatViewPane extends ViewPane {
 		@IHoverService hoverService: IHoverService,
 		@IGameDevChatService private readonly chatService: IGameDevChatService,
 		@IMarkdownRendererService private readonly markdownRendererService: IMarkdownRendererService,
+		@IUnityProjectService private readonly unityProjectService: IUnityProjectService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
 		// Listen to chat service events
 		this._register(this.chatService.onDidUpdateMessages(() => this.renderMessages()));
+
+		// Update context badge when analysis finishes
+		this._register(this.unityProjectService.onDidFinishAnalysis(() => this.updateContextBadge()));
+		this._register(this.unityProjectService.onDidDetectProject(() => this.updateContextBadge()));
 	}
 
 	protected override renderBody(container: HTMLElement): void {
@@ -259,36 +266,85 @@ export class GameDevChatViewPane extends ViewPane {
 		autoArrow.textContent = '▾';
 		autoArrow.style.fontSize = '10px';
 
-		// Project context toggle
-		const contextToggle = append(leftTools, $('label'));
-		contextToggle.style.cssText = `
+		// Project context toggle button
+		const contextBtn = append(leftTools, $('button')) as HTMLButtonElement;
+		this.contextBadge = contextBtn;
+		contextBtn.style.cssText = `
 			display: flex;
 			align-items: center;
-			gap: 4px;
-			font-size: 12px;
+			gap: 5px;
+			background: none;
+			border: 1px solid transparent;
 			color: var(--vscode-foreground);
+			padding: 3px 8px;
+			border-radius: 4px;
+			font-size: 11px;
 			cursor: pointer;
-			user-select: none;
-			opacity: 0.8;
+			transition: all 0.15s;
 		`;
 
-		const contextCheckbox = append(contextToggle, $('input')) as HTMLInputElement;
-		contextCheckbox.type = 'checkbox';
-		contextCheckbox.checked = this.chatService.includeProjectContext;
-		contextCheckbox.style.cssText = `
-			cursor: pointer;
-			accent-color: var(--vscode-focusBorder);
-		`;
+		contextBtn.addEventListener('click', () => {
+			const newValue = !this.chatService.includeProjectContext;
+			this.chatService.setIncludeProjectContext(newValue);
+			this.updateContextBadge();
+		});
 
-		const contextLabel = append(contextToggle, $('span'));
-		contextLabel.textContent = 'Project context';
-
-		this._register(addDisposableListener(contextCheckbox, 'change', () => {
-			this.chatService.setIncludeProjectContext(contextCheckbox.checked);
-		}));
+		this.updateContextBadge();
 
 		// Initial render
 		this.renderMessages();
+	}
+
+	private updateContextBadge(): void {
+		if (!this.contextBadge) {
+			return;
+		}
+
+		const badge = this.contextBadge;
+		const isEnabled = this.chatService.includeProjectContext;
+		const hasContext = this.chatService.hasProjectContext();
+		const projectName = this.chatService.getProjectName();
+
+		// Clear previous content
+		badge.textContent = '';
+
+		if (hasContext && isEnabled) {
+			// Active: project detected and context enabled
+			// allow-any-unicode-next-line
+			const icon = append(badge, $('span'));
+			icon.textContent = '\u{1F3AE}';
+			icon.style.fontSize = '12px';
+			const label = append(badge, $('span'));
+			label.textContent = projectName || 'Unity';
+			badge.style.background = 'rgba(122, 162, 247, 0.15)';
+			badge.style.borderColor = 'rgba(122, 162, 247, 0.4)';
+			badge.style.color = '#7aa2f7';
+			badge.style.opacity = '1';
+			badge.title = `Project context enabled: ${projectName}\nClick to disable`;
+		} else if (hasContext && !isEnabled) {
+			// Available but disabled
+			// allow-any-unicode-next-line
+			const icon = append(badge, $('span'));
+			icon.textContent = '\u{1F3AE}';
+			icon.style.fontSize = '12px';
+			const label = append(badge, $('span'));
+			label.textContent = projectName || 'Unity';
+			badge.style.background = 'none';
+			badge.style.borderColor = 'rgba(255, 255, 255, 0.1)';
+			badge.style.color = 'var(--vscode-descriptionForeground)';
+			badge.style.opacity = '0.5';
+			badge.title = `Project context disabled: ${projectName}\nClick to enable`;
+		} else {
+			// No project detected
+			const label = append(badge, $('span'));
+			label.textContent = 'No project';
+			badge.style.background = 'none';
+			badge.style.borderColor = 'transparent';
+			badge.style.color = 'var(--vscode-descriptionForeground)';
+			badge.style.opacity = '0.4';
+			badge.title = 'No Unity project detected in workspace';
+			badge.style.pointerEvents = 'none';
+		}
 	}
 
 	private renderMessages(): void {

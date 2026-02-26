@@ -12,7 +12,8 @@ import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js'
 import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContainer.js';
 import { IViewContainersRegistry, IViewsRegistry, ViewContainerLocation, Extensions as ViewExtensions, IViewDescriptor } from '../../../common/views.js';
 import { ProjectKnowledgeViewPane } from './projectKnowledgeViewPane.js';
-import { IUnityProjectService, UnityProjectService } from './unityProjectService.js';
+import { IUnityProjectService } from '../common/types.js';
+import { UnityProjectService } from './unityProjectService.js';
 
 // View IDs
 export const GAMEDEV_PROJECT_VIEW_CONTAINER_ID = 'workbench.view.gamedevProject';

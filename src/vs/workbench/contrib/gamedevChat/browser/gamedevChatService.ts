@@ -11,6 +11,7 @@ import { IFileService } from '../../../../platform/files/common/files.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { FileAccess } from '../../../../base/common/network.js';
 import { dirname } from '../../../../base/common/resources.js';
+import { IUnityProjectService } from '../../gamedevUnity/common/types.js';
 
 export interface ISendMessageOptions {
 	includeProjectContext?: boolean;
@@ -39,6 +40,8 @@ export interface IGameDevChatService {
 	clearMessages(): void;
 	readonly includeProjectContext: boolean;
 	setIncludeProjectContext(include: boolean): void;
+	hasProjectContext(): boolean;
+	getProjectName(): string | undefined;
 	setApiKey(apiKey: string): void;
 	getApiKey(): string | undefined;
 }
@@ -71,6 +74,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 	constructor(
 		@IStorageService private readonly storageService: IStorageService,
 		@IFileService private readonly fileService: IFileService,
+		@IUnityProjectService private readonly unityProjectService: IUnityProjectService,
 	) {
 		super();
 		this._loadMessages();
@@ -154,6 +158,14 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		}
 	}
 
+	hasProjectContext(): boolean {
+		return !!this.unityProjectService.buildContextMessage();
+	}
+
+	getProjectName(): string | undefined {
+		return this.unityProjectService.currentProject?.projectName;
+	}
+
 	setApiKey(apiKey: string): void {
 		this._apiKey = apiKey;
 		this.storageService.store(STORAGE_KEY_API_KEY, apiKey, StorageScope.PROFILE, StorageTarget.USER);
@@ -214,7 +226,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		}
 	}
 
-	private async _streamResponse(assistantMessage: IChatMessage, _includeContext: boolean): Promise<void> {
+	private async _streamResponse(assistantMessage: IChatMessage, includeContext: boolean): Promise<void> {
 		// Build messages array for API
 		const apiMessages = this._messages
 			.filter(m => !m.isStreaming)
@@ -223,10 +235,30 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 				content: m.content,
 			}));
 
-		// Build system message
-		const systemMessage = 'You are a helpful AI assistant for game development. You help with Unity projects, C# scripting, game design, and general programming questions.';
+		// Build system message as blocks for prompt caching
+		// Base prompt is tiny and always included
+		const systemBlocks: Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> = [
+			{
+				type: 'text',
+				text: 'You are a helpful AI assistant for game development. You help with Unity projects, C# scripting, game design, and general programming questions.',
+			}
+		];
 
-		// Make API request with streaming
+		// Project context is sent as a CACHED block — Anthropic caches it
+		// after the first call, subsequent calls pay ~10% for cached tokens
+		if (includeContext) {
+			const projectContext = this.unityProjectService.buildContextMessage();
+			if (projectContext) {
+				systemBlocks.push({
+					type: 'text',
+					text: projectContext,
+					cache_control: { type: 'ephemeral' },
+				});
+				console.log('[GameDevChatService] Including cached project context');
+			}
+		}
+
+		// Make API request with streaming and prompt caching
 		const response = await fetch('https://api.anthropic.com/v1/messages', {
 			method: 'POST',
 			headers: {
@@ -234,11 +266,12 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 				'x-api-key': this._apiKey!,
 				'anthropic-version': '2023-06-01',
 				'anthropic-dangerous-direct-browser-access': 'true',
+				'anthropic-beta': 'prompt-caching-2024-07-31',
 			},
 			body: JSON.stringify({
 				model: 'claude-sonnet-4-20250514',
 				max_tokens: 4096,
-				system: systemMessage,
+				system: systemBlocks,
 				messages: apiMessages,
 				stream: true,
 			}),
