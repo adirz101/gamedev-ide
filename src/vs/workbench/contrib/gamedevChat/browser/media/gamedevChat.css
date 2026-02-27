@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-/* Shimmer animation for thinking/loading labels */
+/* ===== Shimmer animation for thinking/loading labels ===== */
 .gamedev-shimmer {
 	background: linear-gradient(
 		90deg,
@@ -25,7 +25,7 @@
 	100% { background-position: -200% 50%; }
 }
 
-/* Pulsing dot for streaming status */
+/* ===== Pulsing dot for streaming status ===== */
 .gamedev-pulse-dot {
 	display: inline-block;
 	width: 6px;
@@ -40,26 +40,41 @@
 	50% { opacity: 1; transform: scale(1.2); }
 }
 
-/* Prevent horizontal overflow in chat messages */
+/* ===== Messages container ===== */
+.gamedev-chat-messages {
+	scroll-behavior: smooth;
+}
+
+.gamedev-chat-messages::-webkit-scrollbar {
+	width: 6px;
+}
+
+.gamedev-chat-messages::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+.gamedev-chat-messages::-webkit-scrollbar-thumb {
+	background: var(--vscode-scrollbarSlider-background);
+	border-radius: 3px;
+}
+
+.gamedev-chat-messages::-webkit-scrollbar-thumb:hover {
+	background: var(--vscode-scrollbarSlider-hoverBackground);
+}
+
+/* ===== Message layout ===== */
+.gamedev-chat-messages .chat-message {
+	min-width: 0;
+	max-width: 100%;
+}
+
 .gamedev-chat-messages .message-content {
 	overflow-wrap: break-word;
 	word-break: break-word;
 	min-width: 0;
-}
-
-.gamedev-chat-messages .message-content pre {
-	overflow-x: auto;
-	max-width: 100%;
-	position: relative;
-}
-
-.gamedev-chat-messages .message-content code {
-	word-break: break-all;
-}
-
-.gamedev-chat-messages .chat-message {
-	min-width: 0;
-	max-width: 100%;
+	font-size: 13px;
+	line-height: 1.6;
+	color: var(--vscode-foreground);
 }
 
 .gamedev-chat-messages .user-message {
@@ -67,7 +82,234 @@
 	word-break: break-word;
 }
 
-/* Thinking section scrollbar */
+/* ===== Code block container ===== */
+.gamedev-code-block {
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 6px;
+	overflow: hidden;
+	margin: 8px 0;
+}
+
+.gamedev-code-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 4px 10px;
+	background: rgba(0, 0, 0, 0.15);
+	border-bottom: 1px solid var(--vscode-panel-border);
+	min-height: 28px;
+}
+
+.gamedev-code-header .gamedev-code-lang {
+	font-size: 11px;
+	font-weight: 500;
+	color: var(--vscode-descriptionForeground);
+	text-transform: uppercase;
+	letter-spacing: 0.3px;
+	user-select: none;
+}
+
+.gamedev-code-header .gamedev-code-copy-btn {
+	background: transparent;
+	border: 1px solid var(--vscode-panel-border);
+	color: var(--vscode-descriptionForeground);
+	padding: 2px 8px;
+	border-radius: 3px;
+	font-size: 11px;
+	cursor: pointer;
+	transition: all 0.15s;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.gamedev-code-header .gamedev-code-copy-btn:hover {
+	background: var(--vscode-button-secondaryBackground);
+	color: var(--vscode-button-secondaryForeground);
+	border-color: var(--vscode-button-secondaryBackground);
+}
+
+.gamedev-code-header .gamedev-code-copy-btn.copied {
+	color: var(--vscode-testing-iconPassed, #73c991);
+	border-color: var(--vscode-testing-iconPassed, #73c991);
+}
+
+.gamedev-code-block pre {
+	margin: 0 !important;
+	border: none !important;
+	border-radius: 0 !important;
+	padding: 10px 12px !important;
+	background: var(--vscode-editor-background) !important;
+	overflow-x: auto;
+	max-width: 100%;
+}
+
+.gamedev-code-block pre code {
+	font-size: 12px;
+	line-height: 1.5;
+	tab-size: 4;
+}
+
+/* Inline code styling */
+.gamedev-chat-messages .message-content code:not(pre code) {
+	background: rgba(0, 0, 0, 0.15);
+	padding: 1px 5px;
+	border-radius: 3px;
+	font-size: 12px;
+}
+
+/* ===== Result cards (bridge commands + file writes) ===== */
+.gamedev-result-card {
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 6px;
+	margin-top: 10px;
+	overflow: hidden;
+	background: rgba(0, 0, 0, 0.05);
+}
+
+.gamedev-result-card-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 12px;
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--vscode-foreground);
+	cursor: pointer;
+	user-select: none;
+}
+
+.gamedev-result-card-header:hover {
+	background: rgba(255, 255, 255, 0.03);
+}
+
+.gamedev-result-card-header .result-icon {
+	font-size: 13px;
+	flex-shrink: 0;
+}
+
+.gamedev-result-card-header .result-summary {
+	flex: 1;
+}
+
+.gamedev-result-card-header .result-chevron {
+	font-size: 8px;
+	transition: transform 0.15s;
+	color: var(--vscode-descriptionForeground);
+}
+
+.gamedev-result-card-body {
+	border-top: 1px solid var(--vscode-panel-border);
+	padding: 4px 0;
+}
+
+.gamedev-result-card-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 3px 12px;
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.gamedev-result-card-item .result-item-icon {
+	flex-shrink: 0;
+	font-size: 12px;
+	width: 14px;
+	text-align: center;
+}
+
+.gamedev-result-card-item.success .result-item-icon {
+	color: var(--vscode-testing-iconPassed, #73c991);
+}
+
+.gamedev-result-card-item.error .result-item-icon {
+	color: var(--vscode-testing-iconFailed, #f48771);
+}
+
+.gamedev-result-card-item .result-item-label {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.gamedev-result-card-item .result-item-error {
+	font-size: 11px;
+	color: var(--vscode-testing-iconFailed, #f48771);
+	opacity: 0.8;
+}
+
+.gamedev-result-card-item.clickable {
+	cursor: pointer;
+}
+
+.gamedev-result-card-item.clickable:hover {
+	background: rgba(255, 255, 255, 0.03);
+	color: var(--vscode-foreground);
+}
+
+/* ===== File cards (Agent mode — compact clickable file references) ===== */
+.gamedev-file-card {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 12px;
+	margin: 4px 0;
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 6px;
+	background: rgba(0, 0, 0, 0.05);
+	cursor: pointer;
+	transition: background 0.15s;
+	font-size: 12px;
+}
+
+.gamedev-file-card:hover {
+	background: rgba(255, 255, 255, 0.05);
+	border-color: var(--vscode-focusBorder);
+}
+
+.gamedev-file-card .file-icon {
+	font-size: 14px;
+	flex-shrink: 0;
+}
+
+.gamedev-file-card .file-path {
+	flex: 1;
+	color: var(--vscode-foreground);
+	font-weight: 500;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.gamedev-file-card .file-lang {
+	font-size: 10px;
+	font-weight: 500;
+	color: var(--vscode-descriptionForeground);
+	text-transform: uppercase;
+	letter-spacing: 0.3px;
+	background: rgba(0, 0, 0, 0.15);
+	padding: 1px 6px;
+	border-radius: 3px;
+	flex-shrink: 0;
+}
+
+.gamedev-file-card.writing {
+	cursor: default;
+	opacity: 0.7;
+}
+
+.gamedev-file-card.writing:hover {
+	background: rgba(0, 0, 0, 0.05);
+	border-color: var(--vscode-panel-border);
+}
+
+.gamedev-file-card.writing .file-path {
+	color: var(--vscode-descriptionForeground);
+}
+
+/* ===== Thinking section ===== */
 .gamedev-thinking-content::-webkit-scrollbar {
 	width: 4px;
 }
@@ -81,7 +323,7 @@
 	background: var(--vscode-scrollbarSlider-hoverBackground);
 }
 
-/* @ mention popup scrollbar */
+/* ===== @ mention popup ===== */
 .gamedev-mention-popup::-webkit-scrollbar {
 	width: 4px;
 }
@@ -95,7 +337,7 @@
 	background: var(--vscode-scrollbarSlider-hoverBackground);
 }
 
-/* Attachment chip hover */
+/* ===== Attachment chips ===== */
 .gamedev-attachment-chip:hover {
 	filter: brightness(1.15);
 }
@@ -104,17 +346,12 @@
 	opacity: 1 !important;
 }
 
-/* Copy button on code blocks */
-.gamedev-code-copy-btn:hover {
-	filter: brightness(1.2);
-}
-
-/* Stop button */
+/* ===== Stop button ===== */
 .gamedev-stop-btn:hover {
 	filter: brightness(1.15);
 }
 
-/* Mode toggle button */
+/* ===== Mode toggle button ===== */
 .gamedev-mode-btn:hover {
 	filter: brightness(1.1);
 }

@@ -49,6 +49,19 @@ export interface ISendMessageOptions {
 	attachments?: IFileAttachment[];
 }
 
+export interface IBridgeCommandResult {
+	readonly category: string;
+	readonly action: string;
+	readonly success: boolean;
+	readonly error?: string;
+}
+
+export interface IAppliedFileResult {
+	readonly filePath: string;
+	readonly status: 'created' | 'updated' | 'error';
+	readonly error?: string;
+}
+
 export interface IChatMessage {
 	id: string;
 	role: 'user' | 'assistant';
@@ -59,6 +72,8 @@ export interface IChatMessage {
 	thinkingDurationMs?: number;
 	streamingPhase?: StreamingPhase;
 	attachments?: IFileAttachment[];
+	bridgeResults?: IBridgeCommandResult[];
+	appliedFiles?: IAppliedFileResult[];
 }
 
 export interface IGameDevChatService {
@@ -336,10 +351,10 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 
 			// In Agent mode, apply file edits and bridge commands from code blocks
 			if (this._mode === ChatMode.Agent && assistantMessage.content) {
-				await this._applyAgentEdits(assistantMessage.content);
+				await this._applyAgentEdits(assistantMessage.content, assistantMessage);
 				console.log('[GameDevChatService] Post-stream: Agent mode, bridge connected:', this.unityBridgeService.isConnected);
 				if (this.unityBridgeService.isConnected) {
-					await this._applyBridgeCommands(assistantMessage.content);
+					await this._applyBridgeCommands(assistantMessage.content, assistantMessage);
 				}
 			}
 
@@ -586,8 +601,10 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		this._onDidUpdateMessages.fire();
 	}
 
-	private async _applyBridgeCommands(content: string): Promise<void> {
+	private async _applyBridgeCommands(content: string, assistantMessage: IChatMessage): Promise<void> {
 		console.log('[GameDevChatService] Scanning for bridge commands, bridge connected:', this.unityBridgeService.isConnected);
+
+		const results: IBridgeCommandResult[] = [];
 
 		// Try multiple patterns — the agent may format bridge commands differently
 		const patterns = [
@@ -609,12 +626,18 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 					console.log(`[GameDevChatService] Executing ${commands.length} bridge commands`);
 					for (const cmd of commands) {
 						console.log(`[GameDevChatService] Bridge command: ${cmd.category}.${cmd.action}`);
-						const response = await this.unityBridgeService.sendCommand(
-							cmd.category as BridgeCommandCategory,
-							cmd.action,
-							cmd.params,
-						);
-						console.log(`[GameDevChatService] Bridge response:`, response.success ? 'OK' : response.error);
+						try {
+							const response = await this.unityBridgeService.sendCommand(
+								cmd.category as BridgeCommandCategory,
+								cmd.action,
+								cmd.params,
+							);
+							console.log(`[GameDevChatService] Bridge response:`, response.success ? 'OK' : response.error);
+							results.push({ category: cmd.category, action: cmd.action, success: response.success, error: response.error });
+						} catch (cmdError) {
+							const errorMsg = cmdError instanceof Error ? cmdError.message : String(cmdError);
+							results.push({ category: cmd.category, action: cmd.action, success: false, error: errorMsg });
+						}
 					}
 				} catch (error) {
 					console.error('[GameDevChatService] Failed to execute bridge commands:', error);
@@ -635,12 +658,18 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 					console.log(`[GameDevChatService] Executing ${commands.length} bridge commands (auto-detected)`);
 					for (const cmd of commands) {
 						console.log(`[GameDevChatService] Bridge command: ${cmd.category}.${cmd.action}`);
-						const response = await this.unityBridgeService.sendCommand(
-							cmd.category as BridgeCommandCategory,
-							cmd.action,
-							cmd.params,
-						);
-						console.log(`[GameDevChatService] Bridge response:`, response.success ? 'OK' : response.error);
+						try {
+							const response = await this.unityBridgeService.sendCommand(
+								cmd.category as BridgeCommandCategory,
+								cmd.action,
+								cmd.params,
+							);
+							console.log(`[GameDevChatService] Bridge response:`, response.success ? 'OK' : response.error);
+							results.push({ category: cmd.category, action: cmd.action, success: response.success, error: response.error });
+						} catch (cmdError) {
+							const errorMsg = cmdError instanceof Error ? cmdError.message : String(cmdError);
+							results.push({ category: cmd.category, action: cmd.action, success: false, error: errorMsg });
+						}
 					}
 				} catch (error) {
 					console.error('[GameDevChatService] Failed to execute auto-detected bridge commands:', error);
@@ -648,6 +677,11 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			} else {
 				console.log('[GameDevChatService] No bridge commands found in response');
 			}
+		}
+
+		if (results.length > 0) {
+			assistantMessage.bridgeResults = results;
+			this._onDidUpdateMessages.fire();
 		}
 	}
 
@@ -665,7 +699,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		return results;
 	}
 
-	private async _applyAgentEdits(content: string): Promise<void> {
+	private async _applyAgentEdits(content: string, assistantMessage: IChatMessage): Promise<void> {
 		const blocks = this._parseFileCodeBlocks(content);
 		if (blocks.length === 0) {
 			return;
@@ -676,6 +710,8 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			return;
 		}
 		const workspaceRoot = folders[0].uri;
+
+		const results: IAppliedFileResult[] = [];
 
 		for (const block of blocks) {
 			const fileUri = URI.joinPath(workspaceRoot, block.filePath);
@@ -688,13 +724,21 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 					const lines = text.split('\n');
 					const fullRange = new Range(1, 1, lines.length, lines[lines.length - 1].length + 1);
 					await this.bulkEditService.apply([new ResourceTextEdit(fileUri, { range: fullRange, text: block.code })]);
+					results.push({ filePath: block.filePath, status: 'updated' });
 				} else {
 					await this.fileService.createFile(fileUri, VSBuffer.fromString(block.code));
+					results.push({ filePath: block.filePath, status: 'created' });
 				}
 				await this.editorService.openEditor({ resource: fileUri });
 			} catch (error) {
 				console.error(`[GameDevChatService] Failed to apply agent edit to ${block.filePath}:`, error);
+				results.push({ filePath: block.filePath, status: 'error', error: error instanceof Error ? error.message : String(error) });
 			}
+		}
+
+		if (results.length > 0) {
+			assistantMessage.appliedFiles = results;
+			this._onDidUpdateMessages.fire();
 		}
 	}
 

@@ -23,7 +23,7 @@ import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPan
 import { IViewDescriptorService } from '../../../common/views.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
-import { ChatMode, IChatMessage, IFileAttachment, IGameDevChatService, IStreamingChunkEvent, StreamingPhase } from './gamedevChatService.js';
+import { ChatMode, IAppliedFileResult, IBridgeCommandResult, IChatMessage, IFileAttachment, IGameDevChatService, IStreamingChunkEvent, StreamingPhase } from './gamedevChatService.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
 import { IUnityProjectService } from '../../gamedevUnity/common/types.js';
@@ -73,6 +73,7 @@ export class GameDevChatViewPane extends ViewPane {
 	private streamingThinkingTimerElement: HTMLElement | undefined;
 	private streamingThinkingTimerInterval: number | undefined;
 	private streamingContentElement: HTMLElement | undefined;
+	private streamingFileCardsElement: HTMLElement | undefined;
 	private streamingMarkdownResult: IRenderedMarkdown | undefined;
 	private lastRenderedAssistantContainer: HTMLElement | undefined;
 	private currentStreamingMessageId: string | undefined;
@@ -108,9 +109,9 @@ export class GameDevChatViewPane extends ViewPane {
 		// Incremental streaming chunks
 		this._register(this.chatService.onDidReceiveChunk((chunk) => this.onStreamingChunk(chunk)));
 
-		// Throttled markdown re-render (300ms)
+		// Throttled markdown re-render (600ms — higher interval reduces lag during streaming)
 		this.markdownRenderScheduler = this._register(new RunOnceScheduler(
-			() => this.updateStreamingMarkdown(), 300
+			() => this.updateStreamingMarkdown(), 600
 		));
 
 		// Debounced @ mention search (150ms)
@@ -472,52 +473,156 @@ export class GameDevChatViewPane extends ViewPane {
 		}
 	}
 
-	private addCopyButtonsToCodeBlocks(container: HTMLElement, disposables: DisposableStore): void {
+	// --- Content stripping for Agent mode ---
+
+	private _prepareDisplayContent(content: string): { displayContent: string; fileCards: { filePath: string; language: string; isComplete: boolean }[] } {
+		const fileCards: { filePath: string; language: string; isComplete: boolean }[] = [];
+		let cleaned = content;
+
+		// 1. Strip complete file code blocks: ```lang:path/to/file\n...\n```
+		cleaned = cleaned.replace(/```(\w+):([^\n]+)\n[\s\S]*?```/g, (_match, lang: string, path: string) => {
+			fileCards.push({ filePath: path.trim(), language: lang, isComplete: true });
+			return '';
+		});
+
+		// 2. Check for incomplete file code block at end (during streaming)
+		const incompleteFileMatch = cleaned.match(/```(\w+):([^\n]+)\n[\s\S]*$/);
+		if (incompleteFileMatch) {
+			fileCards.push({ filePath: incompleteFileMatch[2].trim(), language: incompleteFileMatch[1], isComplete: false });
+			cleaned = cleaned.substring(0, incompleteFileMatch.index);
+		}
+
+		// 3. Strip complete bridge blocks: ```unity-bridge\n...\n```
+		cleaned = cleaned.replace(/```unity-bridge\s*\n[\s\S]*?```/g, '');
+
+		// 4. Strip incomplete bridge block at end
+		cleaned = cleaned.replace(/```unity-bridge[\s\S]*$/, '');
+
+		// 5. Strip bare JSON arrays that look like bridge commands
+		cleaned = cleaned.replace(/\[\s*\{\s*"category"\s*:\s*"(?:gameObject|component|scene|prefab|asset|editor|project)"[\s\S]*?\}\s*\]/g, '');
+
+		// Clean up excessive blank lines left by stripping
+		cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trim();
+
+		return { displayContent: cleaned, fileCards };
+	}
+
+	private renderFileCards(container: HTMLElement, cards: { filePath: string; language: string; isComplete: boolean }[], disposables: DisposableStore): void {
+		for (const card of cards) {
+			const displayLang = GameDevChatViewPane.LANGUAGE_DISPLAY_MAP[card.language] || card.language.toUpperCase();
+			const cardEl = append(container, $(`div.gamedev-file-card${card.isComplete ? '' : '.writing'}`));
+
+			const icon = append(cardEl, $('span.file-icon'));
+			icon.textContent = card.isComplete ? '\uD83D\uDCC4' : '\u23F3'; // 📄 or ⏳
+
+			const pathEl = append(cardEl, $('span.file-path'));
+			pathEl.textContent = card.isComplete ? card.filePath : `Writing ${card.filePath}...`;
+
+			if (displayLang) {
+				const langEl = append(cardEl, $('span.file-lang'));
+				langEl.textContent = displayLang;
+			}
+
+			if (card.isComplete) {
+				disposables.add(addDisposableListener(cardEl, EventType.CLICK, () => {
+					const folders = this.workspaceContextService.getWorkspace().folders;
+					if (folders.length > 0) {
+						const fileUri = URI.joinPath(folders[0].uri, card.filePath);
+						this.openerService.open(fileUri);
+					}
+				}));
+			}
+		}
+	}
+
+	private static readonly LANGUAGE_DISPLAY_MAP: Record<string, string> = {
+		'csharp': 'C#',
+		'cs': 'C#',
+		'typescript': 'TypeScript',
+		'ts': 'TypeScript',
+		'javascript': 'JavaScript',
+		'js': 'JavaScript',
+		'python': 'Python',
+		'py': 'Python',
+		'json': 'JSON',
+		'xml': 'XML',
+		'yaml': 'YAML',
+		'yml': 'YAML',
+		'html': 'HTML',
+		'css': 'CSS',
+		'scss': 'SCSS',
+		'bash': 'Bash',
+		'sh': 'Shell',
+		'shell': 'Shell',
+		'unity-bridge': 'Unity Bridge',
+		'gdscript': 'GDScript',
+		'hlsl': 'HLSL',
+		'glsl': 'GLSL',
+		'shader': 'Shader',
+		'cpp': 'C++',
+		'c': 'C',
+		'lua': 'Lua',
+		'rust': 'Rust',
+		'go': 'Go',
+	};
+
+	private enhanceCodeBlocks(container: HTMLElement, disposables: DisposableStore): void {
 		const preElements = container.querySelectorAll('pre');
 		for (const pre of preElements) {
-			// Skip if already has a copy button
-			if (pre.querySelector('.gamedev-code-copy-btn')) {
+			// Skip if already enhanced
+			if (pre.parentElement?.classList.contains('gamedev-code-block')) {
 				continue;
 			}
 
-			pre.style.position = 'relative';
+			const codeEl = pre.querySelector('code');
+
+			// Detect language from code element class
+			let language = '';
+			if (codeEl) {
+				const classes = Array.from(codeEl.classList);
+				for (const cls of classes) {
+					if (cls.startsWith('language-')) {
+						language = cls.substring(9); // remove 'language-' prefix
+						break;
+					}
+				}
+			}
+
+			const displayLang = GameDevChatViewPane.LANGUAGE_DISPLAY_MAP[language] || language.toUpperCase() || 'Code';
+
+			// Create wrapper
+			const wrapper = document.createElement('div');
+			wrapper.className = 'gamedev-code-block';
+
+			// Create header
+			const header = document.createElement('div');
+			header.className = 'gamedev-code-header';
+
+			const langLabel = document.createElement('span');
+			langLabel.className = 'gamedev-code-lang';
+			langLabel.textContent = displayLang;
+			header.appendChild(langLabel);
 
 			const copyBtn = document.createElement('button');
 			copyBtn.className = 'gamedev-code-copy-btn';
 			copyBtn.textContent = 'Copy';
-			copyBtn.style.cssText = `
-				position: absolute;
-				top: 6px;
-				right: 6px;
-				background: var(--vscode-button-secondaryBackground);
-				color: var(--vscode-button-secondaryForeground);
-				border: none;
-				padding: 2px 8px;
-				border-radius: 3px;
-				font-size: 11px;
-				cursor: pointer;
-				opacity: 0;
-				transition: opacity 0.15s;
-				z-index: 1;
-			`;
+			header.appendChild(copyBtn);
 
-			pre.appendChild(copyBtn);
-
-			disposables.add(addDisposableListener(pre, 'mouseenter', () => {
-				copyBtn.style.opacity = '1';
-			}));
-			disposables.add(addDisposableListener(pre, 'mouseleave', () => {
-				copyBtn.style.opacity = '0';
-			}));
 			disposables.add(addDisposableListener(copyBtn, 'click', async () => {
-				const code = pre.querySelector('code');
-				const text = code ? code.textContent || '' : pre.textContent || '';
+				const text = codeEl ? codeEl.textContent || '' : pre.textContent || '';
 				await this.clipboardService.writeText(text);
 				copyBtn.textContent = 'Copied!';
+				copyBtn.classList.add('copied');
 				setTimeout(() => {
 					copyBtn.textContent = 'Copy';
+					copyBtn.classList.remove('copied');
 				}, 1500);
 			}));
+
+			// Wrap pre element
+			pre.parentNode?.insertBefore(wrapper, pre);
+			wrapper.appendChild(header);
+			wrapper.appendChild(pre);
 		}
 	}
 
@@ -647,11 +752,9 @@ export class GameDevChatViewPane extends ViewPane {
 
 		// Content area for text streaming
 		this.streamingContentElement = append(assistantContainer, $('.message-content'));
-		this.streamingContentElement.style.cssText = `
-			font-size: 13px;
-			line-height: 1.6;
-			color: var(--vscode-foreground);
-		`;
+
+		// File cards container (for Agent mode — shows compact file cards instead of code)
+		this.streamingFileCardsElement = append(assistantContainer, $('.streaming-file-cards'));
 
 		// Track user scroll to disable auto-scroll
 		this.streamingDisposables.add(addDisposableListener(this.messagesContainer, 'scroll', () => {
@@ -674,6 +777,7 @@ export class GameDevChatViewPane extends ViewPane {
 			this.markdownRenderScheduler.cancel();
 		}
 		this.streamingContentElement = undefined;
+		this.streamingFileCardsElement = undefined;
 		this.streamingThinkingElement = undefined;
 		this.streamingThinkingTextElement = undefined;
 		this.streamingThinkingLabelElement = undefined;
@@ -851,6 +955,17 @@ export class GameDevChatViewPane extends ViewPane {
 			return;
 		}
 
+		// In Agent mode, strip file code blocks and bridge commands from display
+		const isAgent = this.chatService.mode === ChatMode.Agent;
+		let displayContent = content;
+		let fileCards: { filePath: string; language: string; isComplete: boolean }[] = [];
+
+		if (isAgent) {
+			const prepared = this._prepareDisplayContent(content);
+			displayContent = prepared.displayContent;
+			fileCards = prepared.fileCards;
+		}
+
 		// Dispose previous markdown render
 		if (this.streamingMarkdownResult) {
 			this.streamingMarkdownResult.dispose();
@@ -858,23 +973,42 @@ export class GameDevChatViewPane extends ViewPane {
 		}
 
 		// Render with fillInIncompleteTokens for partial markdown
-		const rendered = this.markdownRendererService.render(
-			{ value: content, isTrusted: false },
-			{ fillInIncompleteTokens: true },
-		);
-		this.streamingDisposables.add(rendered);
-		this.streamingMarkdownResult = rendered;
+		if (displayContent) {
+			const rendered = this.markdownRendererService.render(
+				{ value: displayContent, isTrusted: false },
+				{ fillInIncompleteTokens: true },
+			);
+			this.streamingDisposables.add(rendered);
+			this.streamingMarkdownResult = rendered;
 
-		clearNode(this.streamingContentElement);
-		this.streamingContentElement.appendChild(rendered.element);
-		this.addCopyButtonsToCodeBlocks(this.streamingContentElement, this.streamingDisposables);
+			clearNode(this.streamingContentElement);
+			this.streamingContentElement.appendChild(rendered.element);
+		} else {
+			clearNode(this.streamingContentElement);
+		}
+
+		// Skip enhanceCodeBlocks during streaming for performance.
+		// Code blocks will be enhanced on the final render after streaming completes.
+
+		// Update file cards in Agent mode
+		if (isAgent && this.streamingFileCardsElement) {
+			clearNode(this.streamingFileCardsElement);
+			if (fileCards.length > 0) {
+				this.renderFileCards(this.streamingFileCardsElement, fileCards, this.streamingDisposables);
+			}
+		}
 
 		this.lastRenderedContent = content;
 	}
 
 	private autoScrollToBottom(): void {
 		if (!this.userHasScrolled && this.messagesContainer) {
-			this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+			requestAnimationFrame(() => {
+				this.messagesContainer.scrollTo({
+					top: this.messagesContainer.scrollHeight,
+					behavior: 'smooth',
+				});
+			});
 		}
 	}
 
@@ -898,7 +1032,12 @@ export class GameDevChatViewPane extends ViewPane {
 
 		// Scroll to bottom (for non-streaming)
 		if (!this.chatService.isStreaming) {
-			this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+			requestAnimationFrame(() => {
+				this.messagesContainer.scrollTo({
+					top: this.messagesContainer.scrollHeight,
+					behavior: 'smooth',
+				});
+			});
 		}
 	}
 
@@ -1003,22 +1142,48 @@ export class GameDevChatViewPane extends ViewPane {
 					this.renderThinkingSection(assistantContainer, message);
 				}
 
-				// Message content (markdown)
+				// Message content (markdown) — strip code/bridge blocks in Agent mode
 				if (message.content) {
-					const contentEl = append(assistantContainer, $('.message-content'));
-					contentEl.style.cssText = `
-						font-size: 13px;
-						line-height: 1.6;
-						color: var(--vscode-foreground);
-					`;
+					const isAgent = this.chatService.mode === ChatMode.Agent;
+					let displayContent = message.content;
+					let fileCards: { filePath: string; language: string; isComplete: boolean }[] = [];
 
-					const rendered = this.markdownRendererService.render({
-						value: message.content,
-						isTrusted: false,
-					});
-					this.messageDisposables.add(rendered);
-					contentEl.appendChild(rendered.element);
-					this.addCopyButtonsToCodeBlocks(contentEl, this.messageDisposables);
+					if (isAgent) {
+						const prepared = this._prepareDisplayContent(message.content);
+						displayContent = prepared.displayContent;
+						fileCards = prepared.fileCards;
+					}
+
+					if (displayContent) {
+						const contentEl = append(assistantContainer, $('.message-content'));
+						const rendered = this.markdownRendererService.render({
+							value: displayContent,
+							isTrusted: false,
+						});
+						this.messageDisposables.add(rendered);
+						contentEl.appendChild(rendered.element);
+
+						// Only enhance code blocks in Ask mode (Agent mode strips file blocks)
+						if (!isAgent) {
+							this.enhanceCodeBlocks(contentEl, this.messageDisposables);
+						}
+					}
+
+					// Render file cards in Agent mode
+					if (isAgent && fileCards.length > 0) {
+						const fileCardsContainer = append(assistantContainer, $('div.file-cards-container'));
+						this.renderFileCards(fileCardsContainer, fileCards, this.messageDisposables);
+					}
+				}
+
+				// Applied files card
+				if (message.appliedFiles && message.appliedFiles.length > 0) {
+					this.renderAppliedFiles(assistantContainer, message.appliedFiles);
+				}
+
+				// Bridge results card
+				if (message.bridgeResults && message.bridgeResults.length > 0) {
+					this.renderBridgeResults(assistantContainer, message.bridgeResults);
 				}
 
 				// Actions row
@@ -1030,7 +1195,7 @@ export class GameDevChatViewPane extends ViewPane {
 						opacity: 0.5;
 					`;
 					const moreBtn = append(actionsRow, $('button'));
-					moreBtn.textContent = '⋯';
+					moreBtn.textContent = '\u22EF';
 					moreBtn.style.cssText = `
 						background: none;
 						border: none;
@@ -1097,6 +1262,110 @@ export class GameDevChatViewPane extends ViewPane {
 			contentArea.style.display = isCollapsed ? 'block' : 'none';
 			chevron.style.transform = isCollapsed ? 'rotate(90deg)' : 'rotate(0deg)';
 		}));
+	}
+
+	private renderAppliedFiles(container: HTMLElement, files: IAppliedFileResult[]): void {
+		const card = append(container, $('div.gamedev-result-card'));
+
+		const successCount = files.filter(f => f.status !== 'error').length;
+		const totalCount = files.length;
+
+		// Header
+		const header = append(card, $('div.gamedev-result-card-header'));
+		const icon = append(header, $('span.result-icon'));
+		icon.textContent = successCount === totalCount ? '\u2705' : '\u26A0\uFE0F'; // checkmark or warning
+		const summary = append(header, $('span.result-summary'));
+		summary.textContent = `Applied ${totalCount} file ${totalCount === 1 ? 'change' : 'changes'}`;
+		const chevron = append(header, $('span.result-chevron'));
+		// allow-any-unicode-next-line
+		chevron.textContent = '▶';
+
+		// Body (collapsible)
+		const body = append(card, $('div.gamedev-result-card-body'));
+		const startExpanded = files.length <= 5;
+		body.style.display = startExpanded ? 'block' : 'none';
+		chevron.style.transform = startExpanded ? 'rotate(90deg)' : 'rotate(0deg)';
+
+		this.messageDisposables.add(addDisposableListener(header, EventType.CLICK, () => {
+			const isCollapsed = body.style.display === 'none';
+			body.style.display = isCollapsed ? 'block' : 'none';
+			chevron.style.transform = isCollapsed ? 'rotate(90deg)' : 'rotate(0deg)';
+		}));
+
+		for (const file of files) {
+			const isError = file.status === 'error';
+			const item = append(body, $(`div.gamedev-result-card-item.${isError ? 'error' : 'success'}.clickable`));
+
+			const itemIcon = append(item, $('span.result-item-icon'));
+			itemIcon.textContent = isError ? '\u2717' : '\u2713'; // X or checkmark
+
+			const label = append(item, $('span.result-item-label'));
+			const verb = file.status === 'created' ? 'Created' : file.status === 'updated' ? 'Updated' : 'Failed';
+			label.textContent = `${verb} ${file.filePath}`;
+
+			if (isError && file.error) {
+				const errorText = append(item, $('span.result-item-error'));
+				errorText.textContent = file.error;
+			}
+
+			if (!isError) {
+				this.messageDisposables.add(addDisposableListener(item, EventType.CLICK, () => {
+					const folders = this.workspaceContextService.getWorkspace().folders;
+					if (folders.length > 0) {
+						const fileUri = URI.joinPath(folders[0].uri, file.filePath);
+						// Use openerService to open the file in the editor
+						this.openerService.open(fileUri);
+					}
+				}));
+			}
+		}
+	}
+
+	private renderBridgeResults(container: HTMLElement, results: IBridgeCommandResult[]): void {
+		const card = append(container, $('div.gamedev-result-card'));
+
+		const successCount = results.filter(r => r.success).length;
+		const totalCount = results.length;
+
+		// Header
+		const header = append(card, $('div.gamedev-result-card-header'));
+		const icon = append(header, $('span.result-icon'));
+		icon.textContent = successCount === totalCount ? '\u26A1' : '\u26A0\uFE0F'; // lightning or warning
+		const summary = append(header, $('span.result-summary'));
+		summary.textContent = `Applied ${totalCount} Unity bridge ${totalCount === 1 ? 'command' : 'commands'}`;
+		if (successCount < totalCount) {
+			summary.textContent += ` (${totalCount - successCount} failed)`;
+		}
+		const chevron = append(header, $('span.result-chevron'));
+		// allow-any-unicode-next-line
+		chevron.textContent = '▶';
+
+		// Body (collapsible)
+		const body = append(card, $('div.gamedev-result-card-body'));
+		const startExpanded = results.length <= 5;
+		body.style.display = startExpanded ? 'block' : 'none';
+		chevron.style.transform = startExpanded ? 'rotate(90deg)' : 'rotate(0deg)';
+
+		this.messageDisposables.add(addDisposableListener(header, EventType.CLICK, () => {
+			const isCollapsed = body.style.display === 'none';
+			body.style.display = isCollapsed ? 'block' : 'none';
+			chevron.style.transform = isCollapsed ? 'rotate(90deg)' : 'rotate(0deg)';
+		}));
+
+		for (const result of results) {
+			const item = append(body, $(`div.gamedev-result-card-item.${result.success ? 'success' : 'error'}`));
+
+			const itemIcon = append(item, $('span.result-item-icon'));
+			itemIcon.textContent = result.success ? '\u2713' : '\u2717'; // checkmark or X
+
+			const label = append(item, $('span.result-item-label'));
+			label.textContent = `${result.category}.${result.action}`;
+
+			if (!result.success && result.error) {
+				const errorSpan = append(item, $('span.result-item-error'));
+				errorSpan.textContent = `\u2014 ${result.error}`;
+			}
+		}
 	}
 
 	// --- Attachment management ---
