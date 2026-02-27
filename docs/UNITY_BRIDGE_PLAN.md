@@ -21,7 +21,7 @@ A live two-way communication bridge between the GameDev IDE and a running Unity 
 
 **Three components:**
 
-1. **Unity C# Plugin** (`GameDevIDEBridge.cs`) — Single file dropped into `Assets/Editor/`. Starts a WebSocket server on localhost, writes the port to a discovery file, dispatches JSON commands to Unity Editor APIs.
+1. **Unity C# Plugin** (`GameDevIDEBridge.cs`) — Auto-deployed to `Assets/Editor/` when the IDE detects a Unity project. Starts a WebSocket server on localhost, writes the port to a discovery file, dispatches JSON commands to Unity Editor APIs. Version-checked and auto-updated.
 
 2. **IDE Bridge Service** (`IUnityBridgeService`) — Discovers the Unity Editor's port, connects via WebSocket, sends commands, handles reconnection on domain reloads.
 

@@ -337,6 +337,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			// In Agent mode, apply file edits and bridge commands from code blocks
 			if (this._mode === ChatMode.Agent && assistantMessage.content) {
 				await this._applyAgentEdits(assistantMessage.content);
+				console.log('[GameDevChatService] Post-stream: Agent mode, bridge connected:', this.unityBridgeService.isConnected);
 				if (this.unityBridgeService.isConnected) {
 					await this._applyBridgeCommands(assistantMessage.content);
 				}
@@ -586,20 +587,66 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 	}
 
 	private async _applyBridgeCommands(content: string): Promise<void> {
-		const regex = /```unity-bridge\n([\s\S]*?)```/g;
-		let match: RegExpExecArray | null;
-		while ((match = regex.exec(content)) !== null) {
-			try {
-				const commands: Array<{ category: string; action: string; params?: Record<string, unknown> }> = JSON.parse(match[1]);
-				for (const cmd of commands) {
-					await this.unityBridgeService.sendCommand(
-						cmd.category as BridgeCommandCategory,
-						cmd.action,
-						cmd.params,
-					);
+		console.log('[GameDevChatService] Scanning for bridge commands, bridge connected:', this.unityBridgeService.isConnected);
+
+		// Try multiple patterns — the agent may format bridge commands differently
+		const patterns = [
+			/```unity-bridge\n([\s\S]*?)```/g,                  // Standard: ```unity-bridge\n...\n```
+			/```unity-bridge\s*\n([\s\S]*?)```/g,               // With extra whitespace
+			/```\s*\n(\[\s*\{\s*"category"[\s\S]*?\}\s*\])```/g, // Generic code block with bridge-shaped JSON
+		];
+
+		let foundCommands = false;
+
+		for (const regex of patterns) {
+			let match: RegExpExecArray | null;
+			while ((match = regex.exec(content)) !== null) {
+				foundCommands = true;
+				const commandText = match[1].trim();
+				console.log('[GameDevChatService] Found bridge commands block:', commandText.substring(0, 100) + '...');
+				try {
+					const commands: Array<{ category: string; action: string; params?: Record<string, unknown> }> = JSON.parse(commandText);
+					console.log(`[GameDevChatService] Executing ${commands.length} bridge commands`);
+					for (const cmd of commands) {
+						console.log(`[GameDevChatService] Bridge command: ${cmd.category}.${cmd.action}`);
+						const response = await this.unityBridgeService.sendCommand(
+							cmd.category as BridgeCommandCategory,
+							cmd.action,
+							cmd.params,
+						);
+						console.log(`[GameDevChatService] Bridge response:`, response.success ? 'OK' : response.error);
+					}
+				} catch (error) {
+					console.error('[GameDevChatService] Failed to execute bridge commands:', error);
 				}
-			} catch (error) {
-				console.error('[GameDevChatService] Failed to execute bridge commands:', error);
+			}
+			if (foundCommands) {
+				break; // Found commands with this pattern, don't try others
+			}
+		}
+
+		// Last resort: look for a JSON array with "category" fields anywhere in the content
+		if (!foundCommands) {
+			const jsonArrayMatch = content.match(/\[\s*\{\s*"category"\s*:\s*"(?:gameObject|component|scene|prefab|asset|editor|project)"[\s\S]*?\}\s*\]/);
+			if (jsonArrayMatch) {
+				console.log('[GameDevChatService] Found bridge commands via JSON detection');
+				try {
+					const commands: Array<{ category: string; action: string; params?: Record<string, unknown> }> = JSON.parse(jsonArrayMatch[0]);
+					console.log(`[GameDevChatService] Executing ${commands.length} bridge commands (auto-detected)`);
+					for (const cmd of commands) {
+						console.log(`[GameDevChatService] Bridge command: ${cmd.category}.${cmd.action}`);
+						const response = await this.unityBridgeService.sendCommand(
+							cmd.category as BridgeCommandCategory,
+							cmd.action,
+							cmd.params,
+						);
+						console.log(`[GameDevChatService] Bridge response:`, response.success ? 'OK' : response.error);
+					}
+				} catch (error) {
+					console.error('[GameDevChatService] Failed to execute auto-detected bridge commands:', error);
+				}
+			} else {
+				console.log('[GameDevChatService] No bridge commands found in response');
 			}
 		}
 	}

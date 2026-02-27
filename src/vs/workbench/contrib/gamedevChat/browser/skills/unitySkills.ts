@@ -126,7 +126,7 @@ export const UNITY_SKILLS_PHYSICS = `
 ### Rigidbody
 - AddForce(vector, ForceMode) in FixedUpdate ONLY.
 - ForceMode.Force: continuous (mass-dependent), ForceMode.Impulse: instant (mass-dependent), ForceMode.VelocityChange: instant (ignores mass).
-- Set velocity directly for precise control: rb.linearVelocity = new Vector3(x, rb.linearVelocity.y, z) (preserve Y for gravity).
+- Set velocity directly for precise control: rb.velocity = new Vector3(x, rb.velocity.y, z) (preserve Y for gravity). Note: use rb.velocity (not linearVelocity which is Unity 6+ only).
 - Kinematic rigidbodies: move with MovePosition/MoveRotation (not transform.position). Still participate in triggers.
 - Interpolation: set to Interpolate for player-controlled objects to smooth visual jitter.
 - Collision Detection: Continuous for fast-moving objects (bullets) to prevent tunneling.

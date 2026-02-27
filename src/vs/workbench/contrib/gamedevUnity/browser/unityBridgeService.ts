@@ -8,6 +8,7 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 import { DeferredPromise } from '../../../../base/common/async.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { URI } from '../../../../base/common/uri.js';
+import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IUnityProjectService } from '../common/types.js';
@@ -29,6 +30,11 @@ import {
 	UnityConsoleLog,
 	UnityPlayModeState,
 } from '../common/bridgeTypes.js';
+import {
+	getBridgePluginSource,
+	BRIDGE_PLUGIN_VERSION,
+	BRIDGE_PLUGIN_INSTALL_PATH,
+} from '../common/bridgePluginSource.js';
 
 export class UnityBridgeService extends Disposable implements IUnityBridgeService {
 	declare readonly _serviceBrand: undefined;
@@ -56,15 +62,29 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 	) {
 		super();
 
-		// Start discovery when a Unity project is detected
+		console.log('[UnityBridgeService] Service created');
+
+		// Auto-deploy plugin and start discovery when a Unity project is detected
 		this._register(this.unityProjectService.onDidDetectProject(() => {
+			console.log('[UnityBridgeService] Project detected via event');
 			this.startDiscovery();
+			this._ensurePluginInstalledSafe();
 		}));
 
 		// If project already detected at construction time
 		if (this.unityProjectService.currentProject?.isUnityProject) {
+			console.log('[UnityBridgeService] Project already detected at construction');
 			this.startDiscovery();
+			this._ensurePluginInstalledSafe();
 		}
+	}
+
+	private _ensurePluginInstalledSafe(): void {
+		// Fire and forget — never block discovery/connection
+		this._ensurePluginInstalled().then(
+			() => console.log('[UnityBridgeService] Plugin install check complete'),
+			(err) => console.warn('[UnityBridgeService] Plugin install failed:', err instanceof Error ? err.message : String(err)),
+		);
 	}
 
 	get connectionState(): UnityBridgeConnectionState {
@@ -75,13 +95,55 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 		return this._connectionState === UnityBridgeConnectionState.Connected;
 	}
 
+	// --- Plugin Auto-Deploy ---
+
+	private async _ensurePluginInstalled(): Promise<void> {
+		console.log('[UnityBridgeService] Checking plugin installation...');
+		const folders = this.workspaceContextService.getWorkspace().folders;
+		if (folders.length === 0) {
+			console.log('[UnityBridgeService] No workspace folders, skipping plugin install');
+			return;
+		}
+
+		const projectRoot = folders[0].uri;
+		const pluginUri = URI.joinPath(projectRoot, BRIDGE_PLUGIN_INSTALL_PATH);
+
+		try {
+			// Check if plugin already exists
+			const existing = await this.fileService.readFile(pluginUri);
+			const existingContent = existing.value.toString();
+
+			// Check version — only update if our version is newer
+			const versionMatch = existingContent.match(/Plugin version:\s*([^\s*]+)/);
+			if (versionMatch && versionMatch[1] === BRIDGE_PLUGIN_VERSION) {
+				// Already up to date
+				return;
+			}
+
+			// Version mismatch or missing — update the plugin
+			console.log(`[UnityBridgeService] Updating bridge plugin from ${versionMatch?.[1] ?? 'unknown'} to ${BRIDGE_PLUGIN_VERSION}`);
+			await this.fileService.writeFile(pluginUri, VSBuffer.fromString(getBridgePluginSource()));
+		} catch {
+			// File doesn't exist — install it
+			try {
+				// Ensure Assets/Editor/ directory exists by creating the file
+				console.log(`[UnityBridgeService] Installing bridge plugin v${BRIDGE_PLUGIN_VERSION} to ${BRIDGE_PLUGIN_INSTALL_PATH}`);
+				await this.fileService.createFile(pluginUri, VSBuffer.fromString(getBridgePluginSource()));
+			} catch (createError) {
+				console.error('[UnityBridgeService] Failed to install bridge plugin:', createError instanceof Error ? createError.message : String(createError));
+			}
+		}
+	}
+
 	// --- Discovery ---
 
 	private startDiscovery(): void {
 		if (this._discoveryPollHandle) {
-			return; // Already polling
+			console.log('[UnityBridgeService] Already polling, skipping startDiscovery');
+			return;
 		}
 
+		console.log('[UnityBridgeService] Starting discovery polling');
 		// Poll immediately, then on interval
 		this.pollForDiscoveryFile();
 		this._discoveryPollHandle = setInterval(() => {
@@ -110,10 +172,12 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 		try {
 			const content = await this.fileService.readFile(discoveryUri);
 			const text = content.value.toString();
+			console.log('[UnityBridgeService] Discovery file found:', text);
 			const info: BridgeDiscoveryInfo = JSON.parse(text);
 
 			// Validate
 			if (!info.port || !info.version) {
+				console.warn('[UnityBridgeService] Discovery file missing port or version');
 				return;
 			}
 
@@ -122,17 +186,14 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 				console.warn(`[UnityBridgeService] Protocol version mismatch: expected ${BRIDGE_PROTOCOL_VERSION}, got ${info.version}`);
 			}
 
-			// Check if stale (older than 60 seconds with no active connection)
 			const age = Date.now() / 1000 - info.timestamp;
-			if (age > 60 && this._connectionState === UnityBridgeConnectionState.Disconnected) {
-				// Stale discovery file — Unity may have closed without cleanup
-				return;
-			}
+			console.log(`[UnityBridgeService] Discovery file age: ${Math.round(age)}s, port: ${info.port}`);
 
 			this._discoveredPort = info.port;
 			await this.connect();
-		} catch {
+		} catch (error) {
 			// File not found or invalid — expected when Unity isn't running
+			console.log('[UnityBridgeService] Discovery file not found or invalid:', error instanceof Error ? error.message : String(error));
 		}
 	}
 
