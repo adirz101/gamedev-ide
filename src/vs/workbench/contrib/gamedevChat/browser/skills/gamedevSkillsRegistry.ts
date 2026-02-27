@@ -5,9 +5,11 @@
 
 import { getUnitySkills, getUnitySkillsCompact } from './unitySkills.js';
 import { getGodotSkills, getGodotSkillsCompact } from './godotSkills.js';
-import { getUnityBridgeSkills } from './unityBridgeSkills.js';
+import { getUnityBridgeSkills as _getUnityBridgeSkills } from './unityBridgeSkills.js';
 
-export { getUnityBridgeSkills };
+export function getUnityBridgeSkills(isConnected?: boolean): string {
+	return _getUnityBridgeSkills(isConnected);
+}
 
 export const enum GameEngine {
 	Unknown = 'unknown',

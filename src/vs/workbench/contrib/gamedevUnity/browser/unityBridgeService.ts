@@ -36,6 +36,14 @@ import {
 	BRIDGE_PLUGIN_INSTALL_PATH,
 } from '../common/bridgePluginSource.js';
 
+/** Discovery file poll states — used to log only on transitions */
+const enum DiscoveryState {
+	Unknown = 'unknown',
+	NotFound = 'notFound',
+	Stale = 'stale',
+	Fresh = 'fresh',
+}
+
 export class UnityBridgeService extends Disposable implements IUnityBridgeService {
 	declare readonly _serviceBrand: undefined;
 
@@ -45,6 +53,9 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 	private _reconnectAttempts = 0;
 	private _discoveredPort: number | undefined;
 	private readonly _pendingRequests = new Map<string, { deferred: DeferredPromise<BridgeResponse>; timeout: ReturnType<typeof setTimeout> }>();
+
+	/** Tracks last discovery poll result to avoid repetitive logging */
+	private _lastDiscoveryState: DiscoveryState = DiscoveryState.Unknown;
 
 	private readonly _onDidChangeConnectionState = this._register(new Emitter<UnityBridgeConnectionState>());
 	readonly onDidChangeConnectionState = this._onDidChangeConnectionState.event;
@@ -139,8 +150,7 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 
 	private startDiscovery(): void {
 		if (this._discoveryPollHandle) {
-			console.log('[UnityBridgeService] Already polling, skipping startDiscovery');
-			return;
+			return; // Already polling
 		}
 
 		console.log('[UnityBridgeService] Starting discovery polling');
@@ -172,12 +182,11 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 		try {
 			const content = await this.fileService.readFile(discoveryUri);
 			const text = content.value.toString();
-			console.log('[UnityBridgeService] Discovery file found:', text);
 			const info: BridgeDiscoveryInfo = JSON.parse(text);
 
 			// Validate
 			if (!info.port || !info.version) {
-				console.warn('[UnityBridgeService] Discovery file missing port or version');
+				this._logDiscoveryTransition(DiscoveryState.NotFound, 'Discovery file missing port or version');
 				return;
 			}
 
@@ -187,13 +196,40 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 			}
 
 			const age = Date.now() / 1000 - info.timestamp;
-			console.log(`[UnityBridgeService] Discovery file age: ${Math.round(age)}s, port: ${info.port}`);
 
+			// Ignore stale discovery files (older than 60s — Unity is likely not running)
+			if (age > 60) {
+				this._logDiscoveryTransition(DiscoveryState.Stale, `Discovery file stale (${Math.round(age)}s old), deleting`);
+				// Delete stale file so we don't re-read it every poll cycle
+				try {
+					await this.fileService.del(discoveryUri);
+				} catch {
+					// Ignore delete errors — file may already be gone
+				}
+				return;
+			}
+
+			// Fresh discovery — log transition and connect
+			this._logDiscoveryTransition(DiscoveryState.Fresh, `Found Unity on port ${info.port} (${Math.round(age)}s old)`);
 			this._discoveredPort = info.port;
 			await this.connect();
-		} catch (error) {
+		} catch {
 			// File not found or invalid — expected when Unity isn't running
-			console.log('[UnityBridgeService] Discovery file not found or invalid:', error instanceof Error ? error.message : String(error));
+			this._logDiscoveryTransition(DiscoveryState.NotFound);
+		}
+	}
+
+	/**
+	 * Log only when the discovery state changes to avoid spamming the console
+	 * every 5 seconds with the same message.
+	 */
+	private _logDiscoveryTransition(newState: DiscoveryState, message?: string): void {
+		if (newState === this._lastDiscoveryState) {
+			return; // Same state — no log
+		}
+		this._lastDiscoveryState = newState;
+		if (message) {
+			console.log(`[UnityBridgeService] ${message}`);
 		}
 	}
 
@@ -270,6 +306,32 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 
 		this._reconnectAttempts = 0;
 		this.setConnectionState(UnityBridgeConnectionState.Disconnected);
+	}
+
+	/**
+	 * Force a fresh connection attempt: re-polls the discovery file and
+	 * tries to connect. Called when the user clicks "Retry" on the bridge
+	 * status indicator.
+	 */
+	async retryConnection(): Promise<void> {
+		// Reset discovery state so next poll will always log
+		this._lastDiscoveryState = DiscoveryState.Unknown;
+		this._reconnectAttempts = 0;
+
+		// Close any existing dead socket
+		if (this._webSocket) {
+			try {
+				this._webSocket.close(1000, 'IDE retrying');
+			} catch { /* ignore */ }
+			this._webSocket = undefined;
+		}
+		this.setConnectionState(UnityBridgeConnectionState.Disconnected);
+
+		// Poll immediately
+		await this.pollForDiscoveryFile();
+
+		// Ensure discovery polling is active
+		this.startDiscovery();
 	}
 
 	private attemptReconnect(): void {

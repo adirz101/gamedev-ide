@@ -115,6 +115,7 @@ export interface IUnityBridgeService {
 	// Connection management
 	connect(): Promise<void>;
 	disconnect(): void;
+	retryConnection(): Promise<void>;
 
 	// Generic command
 	sendCommand(

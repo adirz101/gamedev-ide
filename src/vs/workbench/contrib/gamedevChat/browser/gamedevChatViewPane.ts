@@ -27,6 +27,7 @@ import { ChatMode, IAppliedFileResult, IBridgeCommandResult, IChatMessage, IFile
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
 import { IUnityProjectService } from '../../gamedevUnity/common/types.js';
+import { IUnityBridgeService, UnityBridgeConnectionState } from '../../gamedevUnity/common/bridgeTypes.js';
 import { IRenderedMarkdown } from '../../../../base/browser/markdownRenderer.js';
 import { ISearchService, QueryType } from '../../../services/search/common/search.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
@@ -49,6 +50,11 @@ export class GameDevChatViewPane extends ViewPane {
 	private modeButtonIcon: HTMLElement | undefined;
 	private modeButtonText: HTMLElement | undefined;
 	private rightToolsContainer: HTMLElement | undefined;
+
+	// Bridge connection indicator
+	private bridgeStatusDot: HTMLElement | undefined;
+	private bridgeStatusLabel: HTMLElement | undefined;
+	private bridgeStatusContainer: HTMLElement | undefined;
 
 	// Attachment state
 	private readonly attachments: IFileAttachment[] = [];
@@ -100,6 +106,7 @@ export class GameDevChatViewPane extends ViewPane {
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 		@ILabelService private readonly labelService: ILabelService,
 		@IClipboardService private readonly clipboardService: IClipboardService,
+		@IUnityBridgeService private readonly unityBridgeService: IUnityBridgeService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
@@ -129,6 +136,9 @@ export class GameDevChatViewPane extends ViewPane {
 
 		// Mode toggle sync
 		this._register(this.chatService.onDidChangeMode(() => this.updateModeButton()));
+
+		// Bridge connection status
+		this._register(this.unityBridgeService.onDidChangeConnectionState(() => this.updateBridgeStatus()));
 	}
 
 	protected override renderBody(container: HTMLElement): void {
@@ -152,7 +162,10 @@ export class GameDevChatViewPane extends ViewPane {
 			border-bottom: 1px solid var(--vscode-panel-border);
 		`;
 
-		const headerTitle = append(header, $('span'));
+		const headerLeft = append(header, $('.header-left'));
+		headerLeft.style.cssText = 'display: flex; align-items: center; gap: 8px;';
+
+		const headerTitle = append(headerLeft, $('span'));
 		headerTitle.textContent = 'General chat';
 		headerTitle.style.cssText = `
 			font-size: 12px;
@@ -162,6 +175,35 @@ export class GameDevChatViewPane extends ViewPane {
 			padding: 2px 8px;
 			border-radius: 4px;
 		`;
+
+		// Bridge connection status indicator
+		this.bridgeStatusContainer = append(headerLeft, $('div.gamedev-bridge-status'));
+		this.bridgeStatusContainer.style.cssText = `
+			display: flex;
+			align-items: center;
+			gap: 4px;
+			padding: 2px 8px;
+			border-radius: 4px;
+			font-size: 11px;
+			cursor: default;
+		`;
+		this.bridgeStatusDot = append(this.bridgeStatusContainer, $('span'));
+		this.bridgeStatusDot.style.cssText = `
+			width: 7px;
+			height: 7px;
+			border-radius: 50%;
+			flex-shrink: 0;
+		`;
+		this.bridgeStatusLabel = append(this.bridgeStatusContainer, $('span'));
+		this.bridgeStatusLabel.style.cssText = 'white-space: nowrap;';
+		this._register(addDisposableListener(this.bridgeStatusContainer, EventType.CLICK, () => {
+			if (this.unityBridgeService.connectionState === UnityBridgeConnectionState.Disconnected) {
+				this.bridgeStatusLabel!.textContent = 'Unity \u2014 Retrying...';
+				this.bridgeStatusDot!.style.background = '#e2b93d';
+				this.unityBridgeService.retryConnection();
+			}
+		}));
+		this.updateBridgeStatus();
 
 		const headerActions = append(header, $('.header-actions'));
 		headerActions.style.cssText = 'display: flex; gap: 8px;';
@@ -673,6 +715,41 @@ export class GameDevChatViewPane extends ViewPane {
 			this.modeButtonIcon.textContent = '\u{1F4AC}';
 			this.modeButtonText.textContent = 'Ask';
 			this.modeButton.title = 'Ask mode: AI responds in chat with code to copy. Click to switch to Agent mode.';
+		}
+	}
+
+	private updateBridgeStatus(): void {
+		if (!this.bridgeStatusDot || !this.bridgeStatusLabel || !this.bridgeStatusContainer) {
+			return;
+		}
+
+		const state = this.unityBridgeService.connectionState;
+		switch (state) {
+			case UnityBridgeConnectionState.Connected:
+				this.bridgeStatusDot.style.background = '#73c991';
+				this.bridgeStatusLabel.textContent = 'Unity';
+				this.bridgeStatusContainer.title = 'Connected to Unity Editor';
+				this.bridgeStatusContainer.style.background = 'rgba(115, 201, 145, 0.1)';
+				this.bridgeStatusLabel.style.color = '#73c991';
+				this.bridgeStatusContainer.style.cursor = 'default';
+				break;
+			case UnityBridgeConnectionState.Connecting:
+			case UnityBridgeConnectionState.Reconnecting:
+				this.bridgeStatusDot.style.background = '#e2b93d';
+				this.bridgeStatusLabel.textContent = 'Unity';
+				this.bridgeStatusContainer.title = state === UnityBridgeConnectionState.Connecting ? 'Connecting to Unity Editor...' : 'Reconnecting to Unity Editor...';
+				this.bridgeStatusContainer.style.background = 'rgba(226, 185, 61, 0.1)';
+				this.bridgeStatusLabel.style.color = '#e2b93d';
+				this.bridgeStatusContainer.style.cursor = 'default';
+				break;
+			default:
+				this.bridgeStatusDot.style.background = '#f48771';
+				this.bridgeStatusLabel.textContent = 'Unity \u2014 Click to retry';
+				this.bridgeStatusContainer.title = 'Not connected to Unity Editor. Click to retry connection, or open Unity to auto-connect.';
+				this.bridgeStatusContainer.style.background = 'rgba(244, 135, 113, 0.08)';
+				this.bridgeStatusLabel.style.color = 'var(--vscode-descriptionForeground)';
+				this.bridgeStatusContainer.style.cursor = 'pointer';
+				break;
 		}
 	}
 

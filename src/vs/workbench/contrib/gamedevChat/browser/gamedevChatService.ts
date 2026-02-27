@@ -353,9 +353,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			if (this._mode === ChatMode.Agent && assistantMessage.content) {
 				await this._applyAgentEdits(assistantMessage.content, assistantMessage);
 				console.log('[GameDevChatService] Post-stream: Agent mode, bridge connected:', this.unityBridgeService.isConnected);
-				if (this.unityBridgeService.isConnected) {
-					await this._applyBridgeCommands(assistantMessage.content, assistantMessage);
-				}
+				await this._applyBridgeCommands(assistantMessage.content, assistantMessage);
 			}
 
 			this._saveMessages();
@@ -422,9 +420,10 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			});
 		}
 
-		// Unity Bridge skills — when connected in Agent mode
-		if (this._mode === ChatMode.Agent && this.unityBridgeService.isConnected) {
-			const bridgeSkills = getUnityBridgeSkills();
+		// Unity Bridge skills — always sent in Agent mode with connection status
+		if (this._mode === ChatMode.Agent) {
+			const isConnected = this.unityBridgeService.isConnected;
+			const bridgeSkills = getUnityBridgeSkills(isConnected);
 			systemBlocks.push({
 				type: 'text',
 				text: bridgeSkills,
@@ -602,9 +601,13 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 	}
 
 	private async _applyBridgeCommands(content: string, assistantMessage: IChatMessage): Promise<void> {
-		console.log('[GameDevChatService] Scanning for bridge commands, bridge connected:', this.unityBridgeService.isConnected);
+		const isConnected = this.unityBridgeService.isConnected;
+		console.log('[GameDevChatService] Scanning for bridge commands, bridge connected:', isConnected);
 
 		const results: IBridgeCommandResult[] = [];
+
+		// Parse all bridge commands from the content first
+		const allCommands: Array<{ category: string; action: string; params?: Record<string, unknown> }> = [];
 
 		// Try multiple patterns — the agent may format bridge commands differently
 		const patterns = [
@@ -623,24 +626,9 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 				console.log('[GameDevChatService] Found bridge commands block:', commandText.substring(0, 100) + '...');
 				try {
 					const commands: Array<{ category: string; action: string; params?: Record<string, unknown> }> = JSON.parse(commandText);
-					console.log(`[GameDevChatService] Executing ${commands.length} bridge commands`);
-					for (const cmd of commands) {
-						console.log(`[GameDevChatService] Bridge command: ${cmd.category}.${cmd.action}`);
-						try {
-							const response = await this.unityBridgeService.sendCommand(
-								cmd.category as BridgeCommandCategory,
-								cmd.action,
-								cmd.params,
-							);
-							console.log(`[GameDevChatService] Bridge response:`, response.success ? 'OK' : response.error);
-							results.push({ category: cmd.category, action: cmd.action, success: response.success, error: response.error });
-						} catch (cmdError) {
-							const errorMsg = cmdError instanceof Error ? cmdError.message : String(cmdError);
-							results.push({ category: cmd.category, action: cmd.action, success: false, error: errorMsg });
-						}
-					}
+					allCommands.push(...commands);
 				} catch (error) {
-					console.error('[GameDevChatService] Failed to execute bridge commands:', error);
+					console.error('[GameDevChatService] Failed to parse bridge commands:', error);
 				}
 			}
 			if (foundCommands) {
@@ -655,27 +643,42 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 				console.log('[GameDevChatService] Found bridge commands via JSON detection');
 				try {
 					const commands: Array<{ category: string; action: string; params?: Record<string, unknown> }> = JSON.parse(jsonArrayMatch[0]);
-					console.log(`[GameDevChatService] Executing ${commands.length} bridge commands (auto-detected)`);
-					for (const cmd of commands) {
-						console.log(`[GameDevChatService] Bridge command: ${cmd.category}.${cmd.action}`);
-						try {
-							const response = await this.unityBridgeService.sendCommand(
-								cmd.category as BridgeCommandCategory,
-								cmd.action,
-								cmd.params,
-							);
-							console.log(`[GameDevChatService] Bridge response:`, response.success ? 'OK' : response.error);
-							results.push({ category: cmd.category, action: cmd.action, success: response.success, error: response.error });
-						} catch (cmdError) {
-							const errorMsg = cmdError instanceof Error ? cmdError.message : String(cmdError);
-							results.push({ category: cmd.category, action: cmd.action, success: false, error: errorMsg });
-						}
-					}
+					allCommands.push(...commands);
 				} catch (error) {
-					console.error('[GameDevChatService] Failed to execute auto-detected bridge commands:', error);
+					console.error('[GameDevChatService] Failed to parse auto-detected bridge commands:', error);
 				}
 			} else {
 				console.log('[GameDevChatService] No bridge commands found in response');
+			}
+		}
+
+		if (allCommands.length === 0) {
+			return;
+		}
+
+		// If bridge is not connected, mark all commands as skipped
+		if (!isConnected) {
+			console.log(`[GameDevChatService] Bridge not connected, marking ${allCommands.length} commands as skipped`);
+			for (const cmd of allCommands) {
+				results.push({ category: cmd.category, action: cmd.action, success: false, error: 'Unity Editor not connected' });
+			}
+		} else {
+			// Execute commands
+			console.log(`[GameDevChatService] Executing ${allCommands.length} bridge commands`);
+			for (const cmd of allCommands) {
+				console.log(`[GameDevChatService] Bridge command: ${cmd.category}.${cmd.action}`);
+				try {
+					const response = await this.unityBridgeService.sendCommand(
+						cmd.category as BridgeCommandCategory,
+						cmd.action,
+						cmd.params,
+					);
+					console.log(`[GameDevChatService] Bridge response:`, response.success ? 'OK' : response.error);
+					results.push({ category: cmd.category, action: cmd.action, success: response.success, error: response.error });
+				} catch (cmdError) {
+					const errorMsg = cmdError instanceof Error ? cmdError.message : String(cmdError);
+					results.push({ category: cmd.category, action: cmd.action, success: false, error: errorMsg });
+				}
 			}
 		}
 
