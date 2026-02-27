@@ -1336,9 +1336,29 @@ export class GameDevChatViewPane extends ViewPane {
 		if (successCount < totalCount) {
 			summary.textContent += ` (${totalCount - successCount} failed)`;
 		}
+
+		// Copy button
+		const copyBtn = append(header, $('button.gamedev-code-copy-btn'));
+		copyBtn.textContent = 'Copy';
+		this.messageDisposables.add(addDisposableListener(copyBtn, EventType.CLICK, async (e) => {
+			e.stopPropagation(); // Don't toggle collapse
+			const lines = results.map(r => {
+				const status = r.success ? '\u2713' : '\u2717';
+				const cmd = `${r.category}.${r.action}`;
+				return r.success ? `${status} ${cmd}` : `${status} ${cmd} \u2014 ${r.error ?? 'failed'}`;
+			});
+			await this.clipboardService.writeText(lines.join('\n'));
+			copyBtn.textContent = 'Copied!';
+			copyBtn.classList.add('copied');
+			setTimeout(() => {
+				copyBtn.textContent = 'Copy';
+				copyBtn.classList.remove('copied');
+			}, 1500);
+		}));
+
 		const chevron = append(header, $('span.result-chevron'));
 		// allow-any-unicode-next-line
-		chevron.textContent = '▶';
+		chevron.textContent = '\u25B6';
 
 		// Body (collapsible)
 		const body = append(card, $('div.gamedev-result-card-body'));

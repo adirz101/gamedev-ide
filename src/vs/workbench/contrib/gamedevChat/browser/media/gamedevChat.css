@@ -43,6 +43,19 @@
 /* ===== Messages container ===== */
 .gamedev-chat-messages {
 	scroll-behavior: smooth;
+	-webkit-user-select: text;
+	user-select: text;
+	cursor: text;
+}
+
+/* Keep interactive elements non-selectable */
+.gamedev-chat-messages button,
+.gamedev-chat-messages .gamedev-file-card,
+.gamedev-chat-messages .gamedev-result-card-header,
+.gamedev-chat-messages .gamedev-result-card-item.clickable {
+	-webkit-user-select: none;
+	user-select: none;
+	cursor: pointer;
 }
 
 .gamedev-chat-messages::-webkit-scrollbar {
@@ -80,6 +93,7 @@
 .gamedev-chat-messages .user-message {
 	overflow-wrap: break-word;
 	word-break: break-word;
+	cursor: text;
 }
 
 /* ===== Code block container ===== */

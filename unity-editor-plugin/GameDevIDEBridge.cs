@@ -6,7 +6,7 @@
  *  the running Unity Editor to create GameObjects, scenes, prefabs, etc.
  *
  *  Protocol version: 1.0
- *  Plugin version: 1.0.0
+ *  Plugin version: 1.1.0
  *--------------------------------------------------------------------------------------------*/
 
 using UnityEngine;
@@ -1058,16 +1058,26 @@ public static class GameDevIDEBridge
 
     private static Type FindComponentType(string typeName)
     {
-        // Check UnityEngine types first
-        var type = typeof(Component).Assembly.GetType($"UnityEngine.{typeName}");
-        if (type != null) return type;
+        // Common namespace prefixes for Unity component types.
+        // UI components live in UnityEngine.UI, TMPro, EventSystems — not just UnityEngine.
+        string[] namespacePrefixes = new[]
+        {
+            "UnityEngine.",              // Rigidbody, Canvas, AudioSource, etc.
+            "UnityEngine.UI.",           // Button, Image, Slider, CanvasScaler, GraphicRaycaster, VerticalLayoutGroup, etc.
+            "UnityEngine.EventSystems.", // EventSystem, StandaloneInputModule, etc.
+            "TMPro.",                    // TextMeshProUGUI, TMP_InputField, etc.
+            "",                          // Custom scripts (bare class name in Assembly-CSharp)
+        };
 
-        // Check all loaded assemblies for custom scripts
         foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
         {
-            type = assembly.GetType(typeName);
-            if (type != null && typeof(Component).IsAssignableFrom(type))
-                return type;
+            foreach (var prefix in namespacePrefixes)
+            {
+                var fullName = prefix + typeName;
+                var type = assembly.GetType(fullName);
+                if (type != null && typeof(Component).IsAssignableFrom(type))
+                    return type;
+            }
         }
 
         return null;
