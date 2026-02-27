@@ -80,7 +80,11 @@ export class GameDevChatViewPane extends ViewPane {
 	private streamingThinkingTimerInterval: number | undefined;
 	private streamingContentElement: HTMLElement | undefined;
 	private streamingFileCardsElement: HTMLElement | undefined;
-	private streamingActivityElement: HTMLElement | undefined;
+	private streamingApplyingElement: HTMLElement | undefined;
+	private streamingApplyingLabelElement: HTMLElement | undefined;
+	private streamingApplyingTimerElement: HTMLElement | undefined;
+	private streamingApplyingTimerInterval: number | undefined;
+	private streamingApplyingContentElement: HTMLElement | undefined;
 	private streamingMarkdownResult: IRenderedMarkdown | undefined;
 	private lastRenderedAssistantContainer: HTMLElement | undefined;
 	private currentStreamingMessageId: string | undefined;
@@ -844,8 +848,51 @@ export class GameDevChatViewPane extends ViewPane {
 		// File cards container (for Agent mode — shows compact file cards instead of code)
 		this.streamingFileCardsElement = append(assistantContainer, $('.streaming-file-cards'));
 
-		// Activity container (for post-stream apply phase — shows file writes and bridge commands)
-		this.streamingActivityElement = append(assistantContainer, $('.streaming-activity'));
+		// Applying section (hidden until apply phase — shows like thinking section with timer)
+		this.streamingApplyingElement = append(assistantContainer, $('div.applying-section'));
+		this.streamingApplyingElement.style.cssText = `
+			border: 1px solid var(--vscode-panel-border);
+			border-radius: 6px;
+			margin-top: 8px;
+			overflow: hidden;
+			display: none;
+		`;
+
+		const applyHeader = append(this.streamingApplyingElement, $('div.applying-header'));
+		applyHeader.style.cssText = `
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			padding: 6px 10px;
+			font-size: 12px;
+			color: var(--vscode-descriptionForeground);
+			user-select: none;
+		`;
+		const applyDot = append(applyHeader, $('span.gamedev-pulse-dot'));
+		applyDot.style.cssText = `
+			display: inline-block;
+			width: 6px;
+			height: 6px;
+			border-radius: 50%;
+			background: var(--vscode-textLink-foreground);
+			flex-shrink: 0;
+		`;
+		this.streamingApplyingLabelElement = append(applyHeader, $('span.gamedev-shimmer'));
+		this.streamingApplyingLabelElement.textContent = 'Applying changes...';
+		this.streamingApplyingTimerElement = append(applyHeader, $('span.applying-timer'));
+		this.streamingApplyingTimerElement.style.cssText = `
+			margin-left: auto;
+			font-size: 11px;
+			color: var(--vscode-descriptionForeground);
+			opacity: 0.7;
+		`;
+		this.streamingApplyingTimerElement.textContent = '0s';
+
+		this.streamingApplyingContentElement = append(this.streamingApplyingElement, $('div.applying-content'));
+		this.streamingApplyingContentElement.style.cssText = `
+			padding: 2px 10px 6px;
+			font-size: 12px;
+		`;
 
 		// Track user scroll to disable auto-scroll
 		this.streamingDisposables.add(addDisposableListener(this.messagesContainer, 'scroll', () => {
@@ -867,9 +914,16 @@ export class GameDevChatViewPane extends ViewPane {
 		if (this.markdownRenderScheduler.isScheduled()) {
 			this.markdownRenderScheduler.cancel();
 		}
+		if (this.streamingApplyingTimerInterval) {
+			getWindow(this.messagesContainer).clearInterval(this.streamingApplyingTimerInterval);
+			this.streamingApplyingTimerInterval = undefined;
+		}
 		this.streamingContentElement = undefined;
 		this.streamingFileCardsElement = undefined;
-		this.streamingActivityElement = undefined;
+		this.streamingApplyingElement = undefined;
+		this.streamingApplyingLabelElement = undefined;
+		this.streamingApplyingTimerElement = undefined;
+		this.streamingApplyingContentElement = undefined;
 		this.streamingThinkingElement = undefined;
 		this.streamingThinkingTextElement = undefined;
 		this.streamingThinkingLabelElement = undefined;
@@ -898,9 +952,26 @@ export class GameDevChatViewPane extends ViewPane {
 				// Hide phase indicator once responding — content speaks for itself
 				this.streamingPhaseElement.style.display = 'none';
 				return;
-			case StreamingPhase.Applying:
-				text = 'Applying changes...';
-				break;
+			case StreamingPhase.Applying: {
+				// Hide the simple phase indicator — the applying section takes over
+				this.streamingPhaseElement.style.display = 'none';
+				if (this.streamingApplyingElement) {
+					this.streamingApplyingElement.style.display = 'block';
+					// Reset scroll so user sees the applying section appear
+					this.userHasScrolled = false;
+					// Start timer
+					const applyStartTime = Date.now();
+					const targetWin = getWindow(this.messagesContainer);
+					this.streamingApplyingTimerInterval = targetWin.setInterval(() => {
+						if (this.streamingApplyingTimerElement) {
+							const elapsed = Math.floor((Date.now() - applyStartTime) / 1000);
+							this.streamingApplyingTimerElement.textContent = `${elapsed}s`;
+						}
+					}, 1000);
+				}
+				this.autoScrollToBottom();
+				return;
+			}
 			default:
 				this.streamingPhaseElement.style.display = 'none';
 				return;
@@ -1111,13 +1182,13 @@ export class GameDevChatViewPane extends ViewPane {
 		if (event.messageId !== this.currentStreamingMessageId) {
 			return;
 		}
-		if (!this.streamingActivityElement) {
+		if (!this.streamingApplyingContentElement) {
 			return;
 		}
 
 		if (event.status === 'start') {
 			// Add a new activity line with a pulsing dot
-			const line = append(this.streamingActivityElement, $('div.gamedev-activity-line'));
+			const line = append(this.streamingApplyingContentElement, $('div.gamedev-activity-line'));
 			line.dataset.action = event.action;
 			line.style.cssText = `
 				display: flex;
@@ -1141,7 +1212,7 @@ export class GameDevChatViewPane extends ViewPane {
 			label.style.cssText = 'opacity: 0.8;';
 		} else {
 			// Find the matching start line and update it
-			const lines = this.streamingActivityElement.querySelectorAll<HTMLElement>('.gamedev-activity-line');
+			const lines = this.streamingApplyingContentElement.querySelectorAll<HTMLElement>('.gamedev-activity-line');
 			for (const line of lines) {
 				if (line.dataset.action === event.action) {
 					clearNode(line);

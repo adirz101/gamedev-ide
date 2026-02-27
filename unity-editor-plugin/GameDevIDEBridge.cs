@@ -6,7 +6,7 @@
  *  the running Unity Editor to create GameObjects, scenes, prefabs, etc.
  *
  *  Protocol version: 1.0
- *  Plugin version: 1.1.0
+ *  Plugin version: 1.2.0
  *--------------------------------------------------------------------------------------------*/
 
 using UnityEngine;
@@ -720,9 +720,9 @@ public static class GameDevIDEBridge
 
         if (p.TryGetValue("parentPath", out var parentPath) && !string.IsNullOrEmpty(parentPath))
         {
-            var parent = GameObject.Find(parentPath);
+            var parent = FindGameObjectByPath(parentPath);
             if (parent != null)
-                go.transform.SetParent(parent.transform);
+                go.transform.SetParent(parent.transform, false);
         }
 
         Undo.RegisterCreatedObjectUndo(go, $"Create {name}");
@@ -743,9 +743,9 @@ public static class GameDevIDEBridge
 
         if (p.TryGetValue("parentPath", out var parentPath) && !string.IsNullOrEmpty(parentPath))
         {
-            var parent = GameObject.Find(parentPath);
+            var parent = FindGameObjectByPath(parentPath);
             if (parent != null)
-                go.transform.SetParent(parent.transform);
+                go.transform.SetParent(parent.transform, false);
         }
 
         Undo.RegisterCreatedObjectUndo(go, $"Create {name}");
@@ -756,7 +756,7 @@ public static class GameDevIDEBridge
     private static string HandleFindGameObject(string id, Dictionary<string, string> p)
     {
         var name = p.GetValueOrDefault("name", "");
-        var go = GameObject.Find(name);
+        var go = FindGameObjectByPath(name);
         if (go == null)
             return MakeError(id, $"GameObject not found: {name}");
 
@@ -766,7 +766,7 @@ public static class GameDevIDEBridge
     private static string HandleDestroyGameObject(string id, Dictionary<string, string> p)
     {
         var name = p.GetValueOrDefault("gameObjectPath", p.GetValueOrDefault("name", ""));
-        var go = GameObject.Find(name);
+        var go = FindGameObjectByPath(name);
         if (go == null)
             return MakeError(id, $"GameObject not found: {name}");
 
@@ -777,7 +777,7 @@ public static class GameDevIDEBridge
     private static string HandleSetActive(string id, Dictionary<string, string> p)
     {
         var path = p.GetValueOrDefault("gameObjectPath", "");
-        var go = GameObject.Find(path);
+        var go = FindGameObjectByPath(path);
         if (go == null)
             return MakeError(id, $"GameObject not found: {path}");
 
@@ -790,7 +790,7 @@ public static class GameDevIDEBridge
     private static string HandleSetTransform(string id, Dictionary<string, string> p)
     {
         var path = p.GetValueOrDefault("gameObjectPath", "");
-        var go = GameObject.Find(path);
+        var go = FindGameObjectByPath(path);
         if (go == null)
             return MakeError(id, $"GameObject not found: {path}");
 
@@ -825,7 +825,7 @@ public static class GameDevIDEBridge
     private static string HandleAddComponent(string id, Dictionary<string, string> p)
     {
         var path = p.GetValueOrDefault("gameObjectPath", "");
-        var go = GameObject.Find(path);
+        var go = FindGameObjectByPath(path);
         if (go == null)
             return MakeError(id, $"GameObject not found: {path}");
 
@@ -841,7 +841,7 @@ public static class GameDevIDEBridge
     private static string HandleRemoveComponent(string id, Dictionary<string, string> p)
     {
         var path = p.GetValueOrDefault("gameObjectPath", "");
-        var go = GameObject.Find(path);
+        var go = FindGameObjectByPath(path);
         if (go == null)
             return MakeError(id, $"GameObject not found: {path}");
 
@@ -857,7 +857,7 @@ public static class GameDevIDEBridge
     private static string HandleGetComponents(string id, Dictionary<string, string> p)
     {
         var path = p.GetValueOrDefault("gameObjectPath", "");
-        var go = GameObject.Find(path);
+        var go = FindGameObjectByPath(path);
         if (go == null)
             return MakeError(id, $"GameObject not found: {path}");
 
@@ -877,7 +877,7 @@ public static class GameDevIDEBridge
     private static string HandleSetProperty(string id, Dictionary<string, string> p)
     {
         var path = p.GetValueOrDefault("gameObjectPath", "");
-        var go = GameObject.Find(path);
+        var go = FindGameObjectByPath(path);
         if (go == null)
             return MakeError(id, $"GameObject not found: {path}");
 
@@ -901,11 +901,11 @@ public static class GameDevIDEBridge
             return MakeSuccess(id, $"{{\"property\":{EscapeJson(propName)},\"set\":true}}");
         }
 
-        // Fallback: reflection
+        // Fallback: reflection with smart type conversion
         var field = comp.GetType().GetField(propName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
         if (field != null)
         {
-            var converted = Convert.ChangeType(valueStr, field.FieldType);
+            var converted = SmartConvert(valueStr, field.FieldType);
             field.SetValue(comp, converted);
             return MakeSuccess(id, $"{{\"property\":{EscapeJson(propName)},\"set\":true}}");
         }
@@ -913,7 +913,7 @@ public static class GameDevIDEBridge
         var property = comp.GetType().GetProperty(propName, BindingFlags.Public | BindingFlags.Instance);
         if (property != null && property.CanWrite)
         {
-            var converted = Convert.ChangeType(valueStr, property.PropertyType);
+            var converted = SmartConvert(valueStr, property.PropertyType);
             property.SetValue(comp, converted);
             return MakeSuccess(id, $"{{\"property\":{EscapeJson(propName)},\"set\":true}}");
         }
@@ -926,7 +926,7 @@ public static class GameDevIDEBridge
     private static string HandleCreatePrefab(string id, Dictionary<string, string> p)
     {
         var goPath = p.GetValueOrDefault("gameObjectPath", "");
-        var go = GameObject.Find(goPath);
+        var go = FindGameObjectByPath(goPath);
         if (go == null)
             return MakeError(id, $"GameObject not found: {goPath}");
 
@@ -1056,6 +1056,45 @@ public static class GameDevIDEBridge
 
     // --- Utilities ---
 
+    /// <summary>
+    /// Find a GameObject by hierarchy path, including inactive objects.
+    /// Unity's GameObject.Find() only finds active objects, which fails when
+    /// a parent has been set inactive. This method walks the hierarchy manually.
+    /// </summary>
+    private static GameObject FindGameObjectByPath(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return null;
+
+        // First try the fast path — Unity's built-in (only works for active objects)
+        var found = GameObject.Find(path);
+        if (found != null) return found;
+
+        // Slow path: manually walk the hierarchy (works for inactive objects too)
+        var parts = path.Split('/');
+        var rootName = parts[0];
+
+        // Search through all scene root objects
+        var scene = SceneManager.GetActiveScene();
+        var roots = scene.GetRootGameObjects();
+        GameObject root = null;
+        foreach (var r in roots)
+        {
+            if (r.name == rootName)
+            {
+                root = r;
+                break;
+            }
+        }
+
+        if (root == null) return null;
+        if (parts.Length == 1) return root;
+
+        // Walk down the path using Transform.Find (supports '/' paths and finds inactive children)
+        var subPath = string.Join("/", parts, 1, parts.Length - 1);
+        var child = root.transform.Find(subPath);
+        return child != null ? child.gameObject : null;
+    }
+
     private static Type FindComponentType(string typeName)
     {
         // Common namespace prefixes for Unity component types.
@@ -1083,6 +1122,84 @@ public static class GameDevIDEBridge
         return null;
     }
 
+    /// <summary>
+    /// Smart type conversion that handles enums, Vector2, Vector3, Color, and primitives.
+    /// Falls back to Convert.ChangeType for simple types.
+    /// </summary>
+    private static object SmartConvert(string valueStr, Type targetType)
+    {
+        // Handle nullable
+        var underlyingType = Nullable.GetUnderlyingType(targetType);
+        if (underlyingType != null)
+            targetType = underlyingType;
+
+        // Enum types (RenderMode, ScaleMode, TextAlignmentOptions, etc.)
+        if (targetType.IsEnum)
+        {
+            // Try parsing by name first (e.g. "ScreenSpaceOverlay", "ScaleWithScreenSize")
+            if (Enum.TryParse(targetType, valueStr, true, out var enumVal))
+                return enumVal;
+            // Try parsing as integer
+            if (int.TryParse(valueStr, out var intVal))
+                return Enum.ToObject(targetType, intVal);
+            throw new InvalidCastException($"Cannot convert '{valueStr}' to {targetType.Name}. Valid values: {string.Join(", ", Enum.GetNames(targetType))}");
+        }
+
+        // Vector2
+        if (targetType == typeof(Vector2))
+            return ParseVector2(valueStr);
+
+        // Vector3
+        if (targetType == typeof(Vector3))
+            return ParseVector3(valueStr);
+
+        // Vector4
+        if (targetType == typeof(Vector4))
+            return ParseVector4(valueStr);
+
+        // Color
+        if (targetType == typeof(Color))
+            return ParseColor(valueStr);
+
+        // Bool
+        if (targetType == typeof(bool))
+            return valueStr.ToLower() == "true" || valueStr == "1";
+
+        // Int
+        if (targetType == typeof(int))
+        {
+            int.TryParse(valueStr, out var v);
+            return v;
+        }
+
+        // Float
+        if (targetType == typeof(float))
+        {
+            float.TryParse(valueStr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v);
+            return v;
+        }
+
+        // String
+        if (targetType == typeof(string))
+            return valueStr;
+
+        // Fallback
+        return Convert.ChangeType(valueStr, targetType);
+    }
+
+    private static Vector2 ParseVector2(string str)
+    {
+        str = str.Trim('[', ']', '(', ')').Trim();
+        var parts = str.Split(',');
+        if (parts.Length >= 2)
+        {
+            float.TryParse(parts[0].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x);
+            float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var y);
+            return new Vector2(x, y);
+        }
+        return Vector2.zero;
+    }
+
     private static Vector3 ParseVector3(string str)
     {
         // Handle both "[x,y,z]" and "x,y,z" formats
@@ -1090,12 +1207,48 @@ public static class GameDevIDEBridge
         var parts = str.Split(',');
         if (parts.Length >= 3)
         {
-            float.TryParse(parts[0].Trim(), out var x);
-            float.TryParse(parts[1].Trim(), out var y);
-            float.TryParse(parts[2].Trim(), out var z);
+            float.TryParse(parts[0].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x);
+            float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var y);
+            float.TryParse(parts[2].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var z);
             return new Vector3(x, y, z);
         }
         return Vector3.zero;
+    }
+
+    private static Vector4 ParseVector4(string str)
+    {
+        str = str.Trim('[', ']', '(', ')').Trim();
+        var parts = str.Split(',');
+        if (parts.Length >= 4)
+        {
+            float.TryParse(parts[0].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x);
+            float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var y);
+            float.TryParse(parts[2].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var z);
+            float.TryParse(parts[3].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var w);
+            return new Vector4(x, y, z, w);
+        }
+        return Vector4.zero;
+    }
+
+    private static Color ParseColor(string str)
+    {
+        // Try hex color (#RRGGBB or #RRGGBBAA)
+        if (str.StartsWith("#") && ColorUtility.TryParseHtmlString(str, out var htmlColor))
+            return htmlColor;
+        // Try RGBA components
+        str = str.Trim('[', ']', '(', ')').Trim();
+        var parts = str.Split(',');
+        if (parts.Length >= 3)
+        {
+            float.TryParse(parts[0].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var r);
+            float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var g);
+            float.TryParse(parts[2].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var b);
+            float a = 1f;
+            if (parts.Length >= 4)
+                float.TryParse(parts[3].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out a);
+            return new Color(r, g, b, a);
+        }
+        return Color.white;
     }
 
     private static void SetSerializedPropertyValue(SerializedProperty prop, string value)
@@ -1107,7 +1260,7 @@ public static class GameDevIDEBridge
                     prop.intValue = intVal;
                 break;
             case SerializedPropertyType.Float:
-                if (float.TryParse(value, out var floatVal))
+                if (float.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var floatVal))
                     prop.floatValue = floatVal;
                 break;
             case SerializedPropertyType.Boolean:
@@ -1115,6 +1268,29 @@ public static class GameDevIDEBridge
                 break;
             case SerializedPropertyType.String:
                 prop.stringValue = value;
+                break;
+            case SerializedPropertyType.Enum:
+                // Try name first, then integer
+                var enumNames = prop.enumNames;
+                for (int i = 0; i < enumNames.Length; i++)
+                {
+                    if (string.Equals(enumNames[i], value, StringComparison.OrdinalIgnoreCase))
+                    {
+                        prop.enumValueIndex = i;
+                        return;
+                    }
+                }
+                if (int.TryParse(value, out var enumInt))
+                    prop.enumValueIndex = enumInt;
+                break;
+            case SerializedPropertyType.Vector2:
+                prop.vector2Value = ParseVector2(value);
+                break;
+            case SerializedPropertyType.Vector3:
+                prop.vector3Value = ParseVector3(value);
+                break;
+            case SerializedPropertyType.Color:
+                prop.colorValue = ParseColor(value);
                 break;
         }
     }

@@ -337,6 +337,32 @@
 	background: var(--vscode-scrollbarSlider-hoverBackground);
 }
 
+/* ===== Applying section (bridge commands / file writes phase) ===== */
+.applying-section {
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 6px;
+	overflow: hidden;
+}
+
+.applying-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 10px;
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+	user-select: none;
+}
+
+.applying-content {
+	padding: 2px 10px 6px;
+	font-size: 12px;
+}
+
+.applying-content:empty {
+	display: none;
+}
+
 /* ===== @ mention popup ===== */
 .gamedev-mention-popup::-webkit-scrollbar {
 	width: 4px;
