@@ -25,6 +25,7 @@ export const enum StreamingPhase {
 	LoadingContext = 1,
 	Thinking = 2,
 	Responding = 3,
+	Applying = 4,
 }
 
 export const enum ChatMode {
@@ -37,6 +38,13 @@ export interface IStreamingChunkEvent {
 	readonly type: 'thinking_delta' | 'text_delta' | 'phase_change' | 'thinking_complete';
 	readonly text?: string;
 	readonly phase?: StreamingPhase;
+}
+
+export interface IApplyActivityEvent {
+	readonly messageId: string;
+	readonly action: string;
+	readonly status: 'start' | 'done' | 'error';
+	readonly detail?: string;
 }
 
 export interface IFileAttachment {
@@ -83,6 +91,7 @@ export interface IGameDevChatService {
 	readonly onDidStartStreaming: Event<void>;
 	readonly onDidStopStreaming: Event<void>;
 	readonly onDidReceiveChunk: Event<IStreamingChunkEvent>;
+	readonly onDidApplyActivity: Event<IApplyActivityEvent>;
 
 	readonly messages: IChatMessage[];
 	readonly isStreaming: boolean;
@@ -128,6 +137,9 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 
 	private readonly _onDidReceiveChunk = this._register(new Emitter<IStreamingChunkEvent>());
 	readonly onDidReceiveChunk = this._onDidReceiveChunk.event;
+
+	private readonly _onDidApplyActivity = this._register(new Emitter<IApplyActivityEvent>());
+	readonly onDidApplyActivity = this._onDidApplyActivity.event;
 
 	private readonly _onDidChangeMode = this._register(new Emitter<ChatMode>());
 	readonly onDidChangeMode = this._onDidChangeMode.event;
@@ -346,16 +358,23 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			this._onDidUpdateMessages.fire();
 		} finally {
 			this._abortController = undefined;
-			this._isStreaming = false;
-			this._onDidStopStreaming.fire();
 
-			// In Agent mode, apply file edits and bridge commands from code blocks
+			// In Agent mode, keep streaming state alive and show activity during apply phase
 			if (this._mode === ChatMode.Agent && assistantMessage.content) {
+				// Signal Applying phase so the UI shows activity indicators
+				assistantMessage.streamingPhase = StreamingPhase.Applying;
+				this._onDidReceiveChunk.fire({
+					messageId: assistantMessage.id,
+					type: 'phase_change',
+					phase: StreamingPhase.Applying,
+				});
+
 				await this._applyAgentEdits(assistantMessage.content, assistantMessage);
-				console.log('[GameDevChatService] Post-stream: Agent mode, bridge connected:', this.unityBridgeService.isConnected);
 				await this._applyBridgeCommands(assistantMessage.content, assistantMessage);
 			}
 
+			this._isStreaming = false;
+			this._onDidStopStreaming.fire();
 			this._saveMessages();
 		}
 	}
@@ -656,17 +675,38 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			return;
 		}
 
+		// Fire activity for bridge phase
+		this._onDidApplyActivity.fire({
+			messageId: assistantMessage.id,
+			action: isConnected
+				? `Running ${allCommands.length} bridge command${allCommands.length === 1 ? '' : 's'}`
+				: `${allCommands.length} bridge command${allCommands.length === 1 ? '' : 's'} (Unity not connected)`,
+			status: 'start',
+		});
+
 		// If bridge is not connected, mark all commands as skipped
 		if (!isConnected) {
 			console.log(`[GameDevChatService] Bridge not connected, marking ${allCommands.length} commands as skipped`);
 			for (const cmd of allCommands) {
 				results.push({ category: cmd.category, action: cmd.action, success: false, error: 'Unity Editor not connected' });
 			}
+			this._onDidApplyActivity.fire({
+				messageId: assistantMessage.id,
+				action: `${allCommands.length} bridge command${allCommands.length === 1 ? '' : 's'} skipped`,
+				status: 'error',
+				detail: 'Unity Editor not connected',
+			});
 		} else {
 			// Execute commands
 			console.log(`[GameDevChatService] Executing ${allCommands.length} bridge commands`);
 			for (const cmd of allCommands) {
-				console.log(`[GameDevChatService] Bridge command: ${cmd.category}.${cmd.action}`);
+				const cmdLabel = `${cmd.category}.${cmd.action}`;
+				this._onDidApplyActivity.fire({
+					messageId: assistantMessage.id,
+					action: cmdLabel,
+					status: 'start',
+				});
+
 				try {
 					const response = await this.unityBridgeService.sendCommand(
 						cmd.category as BridgeCommandCategory,
@@ -675,9 +715,23 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 					);
 					console.log(`[GameDevChatService] Bridge response:`, response.success ? 'OK' : response.error);
 					results.push({ category: cmd.category, action: cmd.action, success: response.success, error: response.error });
+
+					this._onDidApplyActivity.fire({
+						messageId: assistantMessage.id,
+						action: cmdLabel,
+						status: response.success ? 'done' : 'error',
+						detail: response.error,
+					});
 				} catch (cmdError) {
 					const errorMsg = cmdError instanceof Error ? cmdError.message : String(cmdError);
 					results.push({ category: cmd.category, action: cmd.action, success: false, error: errorMsg });
+
+					this._onDidApplyActivity.fire({
+						messageId: assistantMessage.id,
+						action: cmdLabel,
+						status: 'error',
+						detail: errorMsg,
+					});
 				}
 			}
 		}
@@ -718,6 +772,14 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 
 		for (const block of blocks) {
 			const fileUri = URI.joinPath(workspaceRoot, block.filePath);
+
+			// Fire start activity
+			this._onDidApplyActivity.fire({
+				messageId: assistantMessage.id,
+				action: `Writing ${block.filePath}`,
+				status: 'start',
+			});
+
 			try {
 				const exists = await this.fileService.exists(fileUri);
 				if (exists) {
@@ -733,9 +795,24 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 					results.push({ filePath: block.filePath, status: 'created' });
 				}
 				await this.editorService.openEditor({ resource: fileUri });
+
+				// Fire done activity
+				this._onDidApplyActivity.fire({
+					messageId: assistantMessage.id,
+					action: `Writing ${block.filePath}`,
+					status: 'done',
+				});
 			} catch (error) {
 				console.error(`[GameDevChatService] Failed to apply agent edit to ${block.filePath}:`, error);
-				results.push({ filePath: block.filePath, status: 'error', error: error instanceof Error ? error.message : String(error) });
+				const errorMsg = error instanceof Error ? error.message : String(error);
+				results.push({ filePath: block.filePath, status: 'error', error: errorMsg });
+
+				this._onDidApplyActivity.fire({
+					messageId: assistantMessage.id,
+					action: `Writing ${block.filePath}`,
+					status: 'error',
+					detail: errorMsg,
+				});
 			}
 		}
 

@@ -23,7 +23,7 @@ import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPan
 import { IViewDescriptorService } from '../../../common/views.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
-import { ChatMode, IAppliedFileResult, IBridgeCommandResult, IChatMessage, IFileAttachment, IGameDevChatService, IStreamingChunkEvent, StreamingPhase } from './gamedevChatService.js';
+import { ChatMode, IAppliedFileResult, IApplyActivityEvent, IBridgeCommandResult, IChatMessage, IFileAttachment, IGameDevChatService, IStreamingChunkEvent, StreamingPhase } from './gamedevChatService.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
 import { IUnityProjectService } from '../../gamedevUnity/common/types.js';
@@ -80,6 +80,7 @@ export class GameDevChatViewPane extends ViewPane {
 	private streamingThinkingTimerInterval: number | undefined;
 	private streamingContentElement: HTMLElement | undefined;
 	private streamingFileCardsElement: HTMLElement | undefined;
+	private streamingActivityElement: HTMLElement | undefined;
 	private streamingMarkdownResult: IRenderedMarkdown | undefined;
 	private lastRenderedAssistantContainer: HTMLElement | undefined;
 	private currentStreamingMessageId: string | undefined;
@@ -116,6 +117,9 @@ export class GameDevChatViewPane extends ViewPane {
 		// Incremental streaming chunks
 		this._register(this.chatService.onDidReceiveChunk((chunk) => this.onStreamingChunk(chunk)));
 
+		// Post-stream activity (file writes, bridge commands)
+		this._register(this.chatService.onDidApplyActivity((event) => this.onApplyActivity(event)));
+
 		// Throttled markdown re-render (600ms — higher interval reduces lag during streaming)
 		this.markdownRenderScheduler = this._register(new RunOnceScheduler(
 			() => this.updateStreamingMarkdown(), 600
@@ -130,9 +134,13 @@ export class GameDevChatViewPane extends ViewPane {
 		this._register(this.unityProjectService.onDidFinishAnalysis(() => this.updateContextBadge()));
 		this._register(this.unityProjectService.onDidDetectProject(() => this.updateContextBadge()));
 
-		// Stop button visibility
+		// Stop button visibility + final render when apply phase completes
 		this._register(this.chatService.onDidStartStreaming(() => this.updateStopButton()));
-		this._register(this.chatService.onDidStopStreaming(() => this.updateStopButton()));
+		this._register(this.chatService.onDidStopStreaming(() => {
+			this.updateStopButton();
+			// Trigger final re-render after apply phase completes
+			this.onStructuralUpdate();
+		}));
 
 		// Mode toggle sync
 		this._register(this.chatService.onDidChangeMode(() => this.updateModeButton()));
@@ -763,11 +771,14 @@ export class GameDevChatViewPane extends ViewPane {
 			// New streaming message just appeared — render all then set up streaming
 			this.renderMessages();
 			this.setupStreamingElements(lastMessage);
-		} else if (!lastMessage?.isStreaming) {
-			// Streaming finished or messages changed structurally
+		} else if (!lastMessage?.isStreaming && !this.chatService.isStreaming) {
+			// Fully finished (streaming + apply phase) — tear down and final render
 			this.teardownStreamingElements();
 			this.renderMessages();
 		}
+		// If message.isStreaming is false but chatService.isStreaming is true,
+		// we are in the Applying phase — don't tear down, just scroll.
+		this.autoScrollToBottom();
 	}
 
 	// --- Incremental streaming ---
@@ -833,6 +844,9 @@ export class GameDevChatViewPane extends ViewPane {
 		// File cards container (for Agent mode — shows compact file cards instead of code)
 		this.streamingFileCardsElement = append(assistantContainer, $('.streaming-file-cards'));
 
+		// Activity container (for post-stream apply phase — shows file writes and bridge commands)
+		this.streamingActivityElement = append(assistantContainer, $('.streaming-activity'));
+
 		// Track user scroll to disable auto-scroll
 		this.streamingDisposables.add(addDisposableListener(this.messagesContainer, 'scroll', () => {
 			const { scrollTop, scrollHeight, clientHeight } = this.messagesContainer;
@@ -855,6 +869,7 @@ export class GameDevChatViewPane extends ViewPane {
 		}
 		this.streamingContentElement = undefined;
 		this.streamingFileCardsElement = undefined;
+		this.streamingActivityElement = undefined;
 		this.streamingThinkingElement = undefined;
 		this.streamingThinkingTextElement = undefined;
 		this.streamingThinkingLabelElement = undefined;
@@ -883,6 +898,9 @@ export class GameDevChatViewPane extends ViewPane {
 				// Hide phase indicator once responding — content speaks for itself
 				this.streamingPhaseElement.style.display = 'none';
 				return;
+			case StreamingPhase.Applying:
+				text = 'Applying changes...';
+				break;
 			default:
 				this.streamingPhaseElement.style.display = 'none';
 				return;
@@ -1089,6 +1107,71 @@ export class GameDevChatViewPane extends ViewPane {
 		}
 	}
 
+	private onApplyActivity(event: IApplyActivityEvent): void {
+		if (event.messageId !== this.currentStreamingMessageId) {
+			return;
+		}
+		if (!this.streamingActivityElement) {
+			return;
+		}
+
+		if (event.status === 'start') {
+			// Add a new activity line with a pulsing dot
+			const line = append(this.streamingActivityElement, $('div.gamedev-activity-line'));
+			line.dataset.action = event.action;
+			line.style.cssText = `
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				padding: 3px 0;
+				font-size: 12px;
+				color: var(--vscode-descriptionForeground);
+			`;
+			const dot = append(line, $('span.gamedev-pulse-dot'));
+			dot.style.cssText = `
+				display: inline-block;
+				width: 5px;
+				height: 5px;
+				border-radius: 50%;
+				background: var(--vscode-textLink-foreground);
+				flex-shrink: 0;
+			`;
+			const label = append(line, $('span'));
+			label.textContent = event.action;
+			label.style.cssText = 'opacity: 0.8;';
+		} else {
+			// Find the matching start line and update it
+			const lines = this.streamingActivityElement.querySelectorAll<HTMLElement>('.gamedev-activity-line');
+			for (const line of lines) {
+				if (line.dataset.action === event.action) {
+					clearNode(line);
+					const icon = append(line, $('span'));
+					icon.style.cssText = 'font-size: 12px; flex-shrink: 0; width: 5px; text-align: center;';
+					if (event.status === 'done') {
+						icon.textContent = '\u2713'; // checkmark
+						icon.style.color = 'var(--vscode-testing-iconPassed, #73c991)';
+					} else {
+						icon.textContent = '\u2717'; // X
+						icon.style.color = 'var(--vscode-testing-iconFailed, #f48771)';
+					}
+					const label = append(line, $('span'));
+					label.textContent = event.action;
+					label.style.cssText = event.status === 'done'
+						? 'color: var(--vscode-descriptionForeground); opacity: 0.7;'
+						: 'color: var(--vscode-testing-iconFailed, #f48771); opacity: 0.9;';
+					if (event.detail && event.status === 'error') {
+						const detail = append(line, $('span'));
+						detail.textContent = ` \u2014 ${event.detail}`;
+						detail.style.cssText = 'font-size: 11px; color: var(--vscode-testing-iconFailed, #f48771); opacity: 0.7;';
+					}
+					break;
+				}
+			}
+		}
+
+		this.autoScrollToBottom();
+	}
+
 	// --- Static message rendering ---
 
 	private renderMessages(): void {
@@ -1107,15 +1190,13 @@ export class GameDevChatViewPane extends ViewPane {
 			this.renderMessage(message);
 		}
 
-		// Scroll to bottom (for non-streaming)
-		if (!this.chatService.isStreaming) {
-			requestAnimationFrame(() => {
-				this.messagesContainer.scrollTo({
-					top: this.messagesContainer.scrollHeight,
-					behavior: 'smooth',
-				});
+		// Always scroll to bottom after rendering messages
+		requestAnimationFrame(() => {
+			this.messagesContainer.scrollTo({
+				top: this.messagesContainer.scrollHeight,
+				behavior: 'smooth',
 			});
-		}
+		});
 	}
 
 	private renderWelcome(): void {
