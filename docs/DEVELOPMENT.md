@@ -1,6 +1,6 @@
-# GameDev IDE - Development & Migration Guide
+# GameDev IDE - Development Guide
 
-How to migrate features from the Electron prototype to VS Code extensions.
+How to build, run, and develop features for GameDev IDE.
 
 ---
 
@@ -9,9 +9,6 @@ How to migrate features from the Electron prototype to VS Code extensions.
 ### Prerequisites
 - Node.js 22.22.0 (managed via fnm)
 - Git
-- Both repositories cloned:
-  - Electron app: `/Users/azechary/Documents/GitHub/GameDevIDE`
-  - VS Code fork: `/Users/azechary/Documents/GitHub/gamedev-ide`
 
 ### Setup
 
@@ -35,579 +32,315 @@ npm run watch
 ./run.sh
 ```
 
-Your custom VS Code fork will launch with the gamedev extensions loaded.
+### Make Changes
+
+1. Edit files in `src/vs/workbench/contrib/gamedev*/`
+2. Watch mode compiles automatically
+3. Reload window: **Cmd+R**
+4. Check DevTools for errors: **Cmd+Shift+I**
 
 ---
 
-## Migration Workflow
+## Project Architecture
 
-### Overview
+GameDev IDE features are **built-in workbench contributions** — they live inside the VS Code source tree at `src/vs/workbench/contrib/` and use VS Code's dependency injection system.
 
-We're porting working features from **GameDevIDE (Electron)** to **gamedev-ide (VS Code fork)**.
+### Why Built-in (Not Extensions)?
 
-**Process for each feature:**
-1. Identify source files in Electron app
-2. Create/update extension structure
-3. Port core logic (TypeScript classes)
-4. Adapt APIs (Electron → VS Code)
-5. Port UI (React → Webviews if needed)
-6. Test with real Unity project
-7. Document what you migrated
+- Deeper integration with VS Code UI (ViewPane in auxiliary bar)
+- Native access to all VS Code services (IFileService, IBulkEditService, etc.)
+- Better performance (no extension host overhead)
+- Cursor-like feel (chat appears as a native sidebar panel)
+
+### Key Directories
+
+```
+src/vs/workbench/contrib/gamedevChat/    AI Chat
+src/vs/workbench/contrib/gamedevUnity/   Unity project detection + bridge
+unity-editor-plugin/                     C# Unity plugin source
+scripts/                                 Build/generation scripts
+```
+
+See [STRUCTURE.md](./STRUCTURE.md) for the complete file breakdown.
 
 ---
 
-## Step-by-Step: Migrating a Feature
+## Adding a New Feature
 
-### Example: AI Assistant
+### Step 1: Create the Contribution
 
-Let's walk through migrating the AI chat feature.
+Create a new directory under `src/vs/workbench/contrib/`:
 
-#### Step 1: Identify Source Files
-
-**In Electron App** (`/Users/azechary/Documents/GitHub/GameDevIDE/`):
 ```
-src/main/services/ai/
-├── ClaudeService.ts          ← Core AI logic
-├── ContextBuilder.ts         ← Project analysis
-└── [IPC handlers]
-
-src/renderer/components/ai/
-├── ChatPanel.tsx             ← Chat UI
-├── ChatMessage.tsx           ← Message component
-└── ...
+src/vs/workbench/contrib/gamedevMyFeature/
+  common/
+    types.ts              Interfaces and types
+  browser/
+    gamedevMyFeature.contribution.ts   Service registration
+    myFeatureService.ts   Business logic
 ```
 
-#### Step 2: Create Extension Structure
-
-**In VS Code Fork** (`extensions/gamedev-ai/`):
-```
-extensions/gamedev-ai/
-├── package.json              ← Already exists (scaffold)
-├── src/
-│   ├── extension.ts          ← Entry point (exists)
-│   ├── claudeService.ts      ← Port ClaudeService.ts here
-│   ├── contextBuilder.ts     ← Port ContextBuilder.ts here
-│   ├── chatProvider.ts       ← Webview provider (exists as aiChatProvider.ts)
-│   └── webview/              ← Create this directory
-│       └── ChatPanel.tsx     ← Port UI here
-```
-
-#### Step 3: Port Core Logic
-
-**Copy and adapt `ClaudeService.ts`**:
-
-```bash
-# Copy file
-cp /Users/azechary/Documents/GitHub/GameDevIDE/src/main/services/ai/ClaudeService.ts \
-   /Users/azechary/Documents/GitHub/gamedev-ide/extensions/gamedev-ai/src/claudeService.ts
-```
-
-**Adapt the code**:
+### Step 2: Define the Service Interface
 
 ```typescript
-// Original (Electron)
-import { app } from 'electron';
-import Store from 'electron-store';
+// common/types.ts
+import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 
-class ClaudeService {
-  private apiKey: string;
-
-  constructor() {
-    const store = new Store();
-    this.apiKey = store.get('anthropic.apiKey') as string;
-  }
+export interface IMyFeatureService {
+    readonly _serviceBrand: undefined;
+    // ... methods
 }
 
-// Adapted (VS Code Extension)
-import * as vscode from 'vscode';
-
-export class ClaudeService {
-  private apiKey: string;
-
-  constructor() {
-    const config = vscode.workspace.getConfiguration('gamedev.ai');
-    this.apiKey = config.get<string>('anthropicApiKey') || '';
-  }
-}
+export const IMyFeatureService = createDecorator<IMyFeatureService>('myFeatureService');
 ```
 
-**Key changes:**
-- Replace `electron` imports → `vscode` imports
-- Replace `electron-store` → `vscode.workspace.getConfiguration()`
-- Replace `fs` → `vscode.workspace.fs`
-- Keep Claude API calls unchanged (they work the same)
-
-#### Step 4: Port Context Builder
-
-**Copy and adapt `ContextBuilder.ts`**:
-
-```bash
-cp /Users/azechary/Documents/GitHub/GameDevIDE/src/main/services/ai/ContextBuilder.ts \
-   /Users/azechary/Documents/GitHub/gamedev-ide/extensions/gamedev-ai/src/contextBuilder.ts
-```
-
-**Adapt file reading**:
+### Step 3: Implement the Service
 
 ```typescript
-// Original (Electron)
-import fs from 'fs';
-const content = fs.readFileSync(filePath, 'utf-8');
-
-// Adapted (VS Code)
-import * as vscode from 'vscode';
-const uri = vscode.Uri.file(filePath);
-const bytes = await vscode.workspace.fs.readFile(uri);
-const content = Buffer.from(bytes).toString('utf-8');
-```
-
-#### Step 5: Port Chat UI
-
-**Set up webview build**:
-
-```bash
-cd extensions/gamedev-ai
-mkdir -p src/webview
-npm install --save-dev webpack webpack-cli ts-loader css-loader
-```
-
-**Copy React components**:
-
-```bash
-cp -r /Users/azechary/Documents/GitHub/GameDevIDE/src/renderer/components/ai/* \
-      extensions/gamedev-ai/src/webview/
-```
-
-**Update webview provider to load React app**:
-
-```typescript
-// chatProvider.ts
-export class ChatProvider implements vscode.WebviewViewProvider {
-  resolveWebviewView(webviewView: vscode.WebviewView) {
-    webviewView.webview.options = { enableScripts: true };
-    webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
-  }
-
-  private getHtmlForWebview(webview: vscode.Webview): string {
-    const scriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'out', 'webview', 'index.js')
-    );
-
-    return `<!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-      </head>
-      <body>
-        <div id="root"></div>
-        <script src="${scriptUri}"></script>
-      </body>
-      </html>`;
-  }
-}
-```
-
-#### Step 6: Test
-
-```bash
-# Watch mode compiling
-npm run watch
-
-# Launch VS Code
-./run.sh
-
-# Test:
-# 1. Click GameDev AI icon in sidebar
-# 2. Type a message
-# 3. Verify Claude responds
-# 4. Check project context is included
-```
-
-#### Step 7: Document
-
-Update migration checklist in `MIGRATION_PLAN.md`:
-```markdown
-### Week 1-2: AI Assistant
-- [x] Port ClaudeService.ts
-- [x] Port ContextBuilder.ts
-- [x] Implement chat webview
-- [x] Add streaming responses
-- [ ] Test with Unity project
-```
-
----
-
-## API Migration Patterns
-
-### File Operations
-
-**Electron:**
-```typescript
-import fs from 'fs';
-import path from 'path';
-
-// Read
-const content = fs.readFileSync('/path/to/file', 'utf-8');
-
-// Write
-fs.writeFileSync('/path/to/file', content, 'utf-8');
-
-// List directory
-const files = fs.readdirSync('/path/to/dir');
-```
-
-**VS Code Extension:**
-```typescript
-import * as vscode from 'vscode';
-
-// Read
-const uri = vscode.Uri.file('/path/to/file');
-const bytes = await vscode.workspace.fs.readFile(uri);
-const content = Buffer.from(bytes).toString('utf-8');
-
-// Write
-const content = Buffer.from('text', 'utf-8');
-await vscode.workspace.fs.writeFile(uri, content);
-
-// List directory
-const dirUri = vscode.Uri.file('/path/to/dir');
-const entries = await vscode.workspace.fs.readDirectory(dirUri);
-```
-
-### Configuration
-
-**Electron:**
-```typescript
-import Store from 'electron-store';
-
-const store = new Store();
-const apiKey = store.get('ai.apiKey');
-store.set('ai.apiKey', 'new-key');
-```
-
-**VS Code Extension:**
-```typescript
-import * as vscode from 'vscode';
-
-const config = vscode.workspace.getConfiguration('gamedev.ai');
-const apiKey = config.get<string>('anthropicApiKey');
-await config.update('anthropicApiKey', 'new-key', vscode.ConfigurationTarget.Global);
-```
-
-### IPC Communication
-
-**Electron:**
-```typescript
-// Main process
-ipcMain.handle('ai:send-message', async (event, message) => {
-  const response = await claudeService.sendMessage(message);
-  return response;
-});
-
-// Renderer
-const response = await window.electron.invoke('ai:send-message', message);
-```
-
-**VS Code Extension:**
-```typescript
-// Register command
-vscode.commands.registerCommand('gamedev-ai.sendMessage', async (message: string) => {
-  const response = await claudeService.sendMessage(message);
-  return response;
-});
-
-// Call from elsewhere
-const response = await vscode.commands.executeCommand('gamedev-ai.sendMessage', message);
-```
-
-### Window/Dialog
-
-**Electron:**
-```typescript
-import { dialog } from 'electron';
-
-const result = await dialog.showOpenDialog({
-  properties: ['openDirectory']
-});
-const folderPath = result.filePaths[0];
-```
-
-**VS Code Extension:**
-```typescript
-import * as vscode from 'vscode';
-
-const uris = await vscode.window.showOpenDialog({
-  canSelectFolders: true,
-  canSelectMany: false
-});
-const folderPath = uris?.[0].fsPath;
-```
-
----
-
-## React UI Migration
-
-### Approach 1: Webview with React (Recommended for Complex UIs)
-
-**Use for**: Chat panel, pixel editor, asset generation panel
-
-1. **Create webview directory**:
-   ```bash
-   cd extensions/my-extension
-   mkdir -p src/webview
-   ```
-
-2. **Copy React components**:
-   ```bash
-   cp -r /path/to/electron/components/* src/webview/
-   ```
-
-3. **Create webview entry point**:
-   ```typescript
-   // src/webview/index.tsx
-   import React from 'react';
-   import ReactDOM from 'react-dom';
-   import { ChatPanel } from './ChatPanel';
-
-   ReactDOM.render(<ChatPanel />, document.getElementById('root'));
-   ```
-
-4. **Set up webpack** (see pixel editor migration guide for full config)
-
-5. **Load in provider**:
-   ```typescript
-   webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
-   ```
-
-### Approach 2: TreeView (Recommended for Lists/Hierarchies)
-
-**Use for**: GameObject hierarchy, asset browser, scene explorer
-
-```typescript
-export class SceneExplorerProvider implements vscode.TreeDataProvider<GameObject> {
-  getTreeItem(element: GameObject): vscode.TreeItem {
-    const treeItem = new vscode.TreeItem(
-      element.name,
-      element.children.length > 0
-        ? vscode.TreeItemCollapsibleState.Collapsed
-        : vscode.TreeItemCollapsibleState.None
-    );
-    treeItem.iconPath = new vscode.ThemeIcon('symbol-class');
-    return treeItem;
-  }
-
-  getChildren(element?: GameObject): GameObject[] {
-    return element ? element.children : this.rootGameObjects;
-  }
-}
-```
-
----
-
-## Testing Workflow
-
-### During Development
-
-```bash
-# Terminal 1: Watch mode
-cd /Users/azechary/Documents/GitHub/gamedev-ide
-npm run watch
-
-# Terminal 2: Run VS Code
-./run.sh
-
-# After making changes:
-# Cmd+R in the running VS Code window to reload
-```
-
-### Testing Extensions
-
-1. **Check extension loaded**:
-   - Open Command Palette (Cmd+Shift+P)
-   - Search for your extension's commands
-   - Should appear in list
-
-2. **Check views**:
-   - Look for new icons in Activity Bar (left sidebar)
-   - Click icon to open your view
-   - Verify UI renders correctly
-
-3. **Check functionality**:
-   - Test core features (AI chat, scene parsing, etc.)
-   - Open DevTools (Cmd+Shift+I) to check for errors
-   - Look in Console tab for logs
-
-4. **Test with real project**:
-   - Open a Unity project folder
-   - Test extension features
-   - Verify project context works
-
-### Debugging
-
-**Extension Host Logs**:
-```
-Help → Toggle Developer Tools → Console
-Filter by your extension name
-```
-
-**Breakpoints**:
-```typescript
-// In your TypeScript code
-debugger;  // Will pause when DevTools is open
-console.log('Debug info:', data);
-```
-
-**Webview Debugging**:
-```
-Right-click in webview → Inspect Element
-Opens dedicated DevTools for that webview
-```
-
----
-
-## Common Migration Issues
-
-### Issue 1: "Module not found"
-
-**Problem**: Import paths from Electron don't work
-```typescript
-import { ClaudeService } from '../../../main/services/ai/ClaudeService';
-```
-
-**Solution**: Update to extension-relative imports
-```typescript
-import { ClaudeService } from './claudeService';
-```
-
-### Issue 2: "Cannot read property of undefined"
-
-**Problem**: Configuration not found
-```typescript
-const apiKey = config.get('anthropic.apiKey');  // undefined
-```
-
-**Solution**: Check configuration is registered in `package.json`
-```json
-"configuration": {
-  "properties": {
-    "gamedev.ai.anthropicApiKey": {
-      "type": "string"
+// browser/myFeatureService.ts
+import { Disposable } from '../../../../base/common/lifecycle.js';
+import { IMyFeatureService } from '../common/types.js';
+
+export class MyFeatureService extends Disposable implements IMyFeatureService {
+    declare readonly _serviceBrand: undefined;
+
+    constructor(
+        @IFileService private readonly fileService: IFileService,
+        // ... other injected services
+    ) {
+        super();
     }
-  }
 }
 ```
 
-### Issue 3: Webview not loading
+### Step 4: Register the Service
 
-**Problem**: React app doesn't render in webview
-
-**Solution**: Check script URI is correct
 ```typescript
-const scriptUri = webview.asWebviewUri(
-  vscode.Uri.joinPath(this.extensionUri, 'out', 'webview', 'bundle.js')
-);
+// browser/gamedevMyFeature.contribution.ts
+import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
+import { IMyFeatureService } from '../common/types.js';
+import { MyFeatureService } from './myFeatureService.js';
+
+registerSingleton(IMyFeatureService, MyFeatureService, InstantiationType.Delayed);
 ```
 
-### Issue 4: File paths incorrect
+### Step 5: Wire Into the Workbench
 
-**Problem**: `/Users/...` absolute paths don't work
+Add the contribution import to the workbench entry point so it loads:
 
-**Solution**: Use workspace-relative paths
+```
+src/vs/workbench/workbench.common.main.ts
+```
+
+Add a line like:
 ```typescript
-const workspaceRoot = vscode.workspace.workspaceFolders?.[0].uri.fsPath;
-const filePath = path.join(workspaceRoot, 'Assets', 'Scenes', 'Main.unity');
+import './contrib/gamedevMyFeature/browser/gamedevMyFeature.contribution.js';
 ```
 
 ---
 
-## Extension-Specific Migration Guides
+## Working with the AI Chat
 
-### AI Assistant
-- **Priority**: 1 (Week 1-2)
-- **Complexity**: Medium
-- **Reusability**: 70% (API client, context builder reusable)
-- **Main challenge**: Webview setup for chat UI
+### Service: `GameDevChatService`
 
-### Unity Integration
-- **Priority**: 2 (Week 3-4)
-- **Complexity**: Medium
-- **Reusability**: 90% (YAML parser works as-is)
-- **Main challenge**: TreeView for GameObject hierarchy
+The chat service (`IGameDevChatService`) handles:
+- Claude API calls with streaming
+- Message management and persistence
+- Agent mode file writing
+- Bridge command parsing and execution
+- Activity event emission
 
-### Pixel Editor
-- **Priority**: 3 (Week 5-6)
-- **Complexity**: High
-- **Reusability**: 80% (Canvas code works as-is)
-- **Main challenge**: CustomTextEditorProvider setup
+### ViewPane: `GameDevChatViewPane`
 
-### Asset Generation
-- **Priority**: 4 (Week 7-8)
-- **Complexity**: Medium
-- **Reusability**: 70% (API client, fix parsing bug)
-- **Main challenge**: Webview for generation form
+The view pane handles all UI rendering:
+- Messages (user + assistant)
+- Streaming with incremental markdown rendering
+- Thinking sections (collapsible, with timer)
+- File cards and bridge result cards
+- Input with @ mentions and attachments
+- Phase indicators and applying section
 
----
+### Adding AI Skills
 
-## Performance Tips
-
-### Lazy Loading
+To teach the AI about a new feature, add a skills file:
 
 ```typescript
-// Don't load everything at activation
-export async function activate(context: vscode.ExtensionContext) {
-  // Register provider immediately
-  context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider('my-view', provider)
-  );
-
-  // But only create heavy objects when needed
-  provider.onDidChangeVisibility(() => {
-    if (provider.visible && !claudeService) {
-      claudeService = new ClaudeService();  // Load heavy service only when visible
-    }
-  });
+// skills/myFeatureSkills.ts
+export function getMyFeatureSkills(): string {
+    return `## My Feature\n\nInstructions for the AI...\n`;
 }
 ```
 
-### Webview Optimization
+Then register it in `gamedevSkillsRegistry.ts`:
 
 ```typescript
-// Dispose webview when not visible
-webviewView.onDidChangeVisibility(() => {
-  if (!webviewView.visible) {
-    webviewView.webview.html = '';  // Clear content
-  } else {
-    webviewView.webview.html = this.getHtmlForWebview();  // Reload
-  }
-});
+import { getMyFeatureSkills } from './myFeatureSkills.js';
+
+export function buildSkillsPromptBlock(engine: GameEngine): string {
+    // ... existing skills ...
+    result += getMyFeatureSkills();
+    return result;
+}
 ```
 
 ---
 
-## Next Steps
+## Working with the Unity Bridge
 
-1. **Start with AI Assistant** ([MIGRATION_PLAN.md](./MIGRATION_PLAN.md) Week 1-2)
-2. **Use this guide** to port ClaudeService and ContextBuilder
-3. **Set up webview** for chat UI
-4. **Test** with Unity project
-5. **Move to next feature** (Unity Integration)
+### Modifying the C# Plugin
+
+1. Edit `unity-editor-plugin/GameDevIDEBridge.cs`
+2. Bump the version in the header comment
+3. Regenerate the embedded source:
+   ```bash
+   node scripts/generate-bridge-plugin-source.js
+   ```
+4. The IDE will auto-deploy the new version to Unity projects
+
+### Adding a New Bridge Command
+
+1. Add a handler method in `GameDevIDEBridge.cs`:
+   ```csharp
+   private string HandleMyAction(JsonNode paramsNode)
+   {
+       // ... Unity Editor API calls ...
+       return CreateSuccessResponse(requestId, result);
+   }
+   ```
+
+2. Register it in the command dispatch switch:
+   ```csharp
+   case "myCategory.myAction":
+       response = HandleMyAction(paramsNode);
+       break;
+   ```
+
+3. Add convenience method to `IUnityBridgeService` if useful:
+   ```typescript
+   // bridgeTypes.ts
+   myAction(param: string): Promise<BridgeResponse>;
+   ```
+
+4. Update the bridge skills to tell the AI about the new command:
+   ```typescript
+   // unityBridgeSkills.ts - add to command reference
+   ```
+
+5. Regenerate: `node scripts/generate-bridge-plugin-source.js`
+
+### Testing Bridge Commands
+
+1. Open GameDev IDE with a Unity project workspace
+2. Open the same project in Unity Editor
+3. Wait for green dot in chat header (Connected)
+4. Use Agent mode and ask the AI to create something
+5. Watch Unity Editor — objects should appear in the scene
+6. Check Unity Console for any errors
+
+---
+
+## Testing
+
+### TypeScript Compilation
+
+Monitor the build watch task for compilation errors:
+```bash
+npm run watch
+```
+
+Check specific files:
+```bash
+npx tsc --noEmit --project src/tsconfig.json 2>&1 | grep gamedev
+```
+
+### Manual Testing
+
+1. Launch with `./run.sh`
+2. Open a Unity project folder
+3. Test chat in both Ask and Agent modes
+4. Test with Unity Editor connected and disconnected
+5. Check DevTools console for errors (Cmd+Shift+I)
+
+### Key Things to Test
+
+- [ ] Chat streaming renders smoothly (no visible lag)
+- [ ] Thinking section expands/collapses correctly
+- [ ] Agent mode strips code blocks and shows file cards
+- [ ] File cards are clickable and open the file
+- [ ] Bridge commands execute and show result cards
+- [ ] Bridge status indicator reflects connection state
+- [ ] Stop button cancels streaming
+- [ ] @ mention popup shows file results
+- [ ] Drag-and-drop attaches files
+- [ ] Mode toggle switches between Ask and Agent
+- [ ] Messages persist across window reloads
+
+---
+
+## Debugging
+
+### DevTools Console
+
+```
+Cmd+Shift+I -> Console tab
+```
+
+Filter by:
+- `[GameDevChatService]` — Chat API calls, bridge commands
+- `[UnityBridgeService]` — Connection state, discovery
+- `[UnityProjectService]` — Project detection, analysis
+
+### Common Issues
+
+**Chat not sending:** Check API key is set (gear icon in chat header)
+
+**Bridge not connecting:** Check:
+1. Unity Editor is open with the project
+2. `Library/GameDevIDE/bridge.json` exists in the Unity project
+3. No firewall blocking localhost WebSocket
+4. Check Unity Console for "GameDev IDE Bridge started" message
+
+**Bridge commands failing:** Check Unity Console for errors. Common causes:
+- Component type not found (custom script not yet compiled)
+- GameObject path wrong (inactive objects need full hierarchy path)
+- Type conversion error (check SmartConvert handles the type)
+
+**Agent mode not writing files:** Check:
+1. Mode is set to Agent (not Ask)
+2. AI response contains `` ```language:path `` code blocks
+3. Workspace folder is open (not just a single file)
+
+---
+
+## Performance Notes
+
+### Streaming Markdown
+
+The markdown render throttle is set to 600ms to balance responsiveness and performance. During streaming:
+- `enhanceCodeBlocks()` is skipped (expensive DOM mutations)
+- Content stripping in Agent mode reduces rendered content significantly
+- Code blocks are enhanced only on the final render
+
+### Bridge Command Execution
+
+Commands are executed sequentially (not in parallel) to avoid race conditions in Unity. Each command waits for a response before the next is sent.
 
 ---
 
 ## Resources
 
 ### Documentation
-- **[MIGRATION_PLAN.md](./MIGRATION_PLAN.md)** - Overall migration strategy
-- **[STRUCTURE.md](./STRUCTURE.md)** - Where everything lives
-- **[UI_CUSTOMIZATION.md](./UI_CUSTOMIZATION.md)** - UI/theming changes (Cursor-like design)
-- **Electron Source**: `/Users/azechary/Documents/GitHub/GameDevIDE`
+- [STRUCTURE.md](./STRUCTURE.md) — File organization
+- [UI_CUSTOMIZATION.md](./UI_CUSTOMIZATION.md) — UI/theming changes
+- [UNITY_BRIDGE_PLAN.md](./UNITY_BRIDGE_PLAN.md) — Bridge protocol details
 
-### VS Code Extension API
-- **Extension Guide**: https://code.visualstudio.com/api/get-started/your-first-extension
-- **Extension API**: https://code.visualstudio.com/api/references/vscode-api
-- **Webview Guide**: https://code.visualstudio.com/api/extension-guides/webview
-- **TreeView Guide**: https://code.visualstudio.com/api/extension-guides/tree-view
-- **Custom Editor**: https://code.visualstudio.com/api/extension-guides/custom-editors
+### VS Code Internals
+- VS Code source: `src/vs/` directory
+- Service injection: `createDecorator` + `registerSingleton`
+- ViewPane: `src/vs/workbench/browser/parts/views/viewPane.ts`
+- Events: `Emitter<T>` from `src/vs/base/common/event.ts`
+- Disposables: `DisposableStore`, `MutableDisposable`
 
 ---
 
-**Follow this guide for each feature and the migration will go smoothly!** 🚀
+**Last updated:** 2026-02-28

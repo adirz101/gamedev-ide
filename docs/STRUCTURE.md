@@ -1,6 +1,6 @@
 # GameDev IDE - Project Structure
 
-Complete directory breakdown for the VS Code fork and extension architecture.
+Complete directory breakdown for the VS Code fork with built-in game development contributions.
 
 ---
 
@@ -8,541 +8,241 @@ Complete directory breakdown for the VS Code fork and extension architecture.
 
 ```
 gamedev-ide/  (VS Code Fork)
-├── src/                         ← VS CODE SOURCE
+├── src/                                 VS CODE SOURCE
 │   └── vs/
 │       └── workbench/
 │           └── contrib/
-│               └── gamedevChat/ ← BUILT-IN AI CHAT (Cursor-style)
+│               ├── gamedevChat/         BUILT-IN AI CHAT (Cursor-style)
+│               │   └── browser/
+│               │       ├── gamedevChat.contribution.ts    View + service registration
+│               │       ├── gamedevChatService.ts          Claude API, streaming, agent logic
+│               │       ├── gamedevChatViewPane.ts         Full chat UI (ViewPane)
+│               │       ├── skills/                        AI knowledge injection
+│               │       │   ├── gamedevSkillsRegistry.ts   Skills registry + builder
+│               │       │   ├── unitySkills.ts             Unity engine knowledge
+│               │       │   └── unityBridgeSkills.ts       Bridge command format
+│               │       └── media/
+│               │           └── gamedevChat.css            Chat styles
+│               │
+│               └── gamedevUnity/        UNITY PROJECT + BRIDGE
+│                   ├── common/
+│                   │   ├── types.ts                       IUnityProjectService interface
+│                   │   ├── bridgeTypes.ts                 Protocol types, IUnityBridgeService
+│                   │   └── bridgePluginSource.ts           Base64-encoded C# plugin (generated)
 │                   └── browser/
-│                       ├── gamedevChat.contribution.ts
-│                       ├── gamedevChatService.ts
-│                       └── gamedevChatViewPane.ts
+│                       ├── gamedevUnity.contribution.ts   Service registration
+│                       ├── unityProjectService.ts         Project detection + context
+│                       └── unityBridgeService.ts          WebSocket client + reconnection
 │
-├── extensions/                   ← OUR GAME DEV EXTENSIONS
-│   ├── godot-integration/       Godot scene viewer (to rename to unity-integration)
-│   ├── asset-generation/        PixelLab + asset browser
-│   ├── pixel-editor/            Pixel art editor (to be created)
-│   └── theme-gamedev-dark/      Custom dark theme (Cursor-like)
+├── unity-editor-plugin/                 UNITY C# PLUGIN SOURCE
+│   └── GameDevIDEBridge.cs              WebSocket server for Unity Editor (v1.2.0)
 │
-├── docs/                        ← THIS DOCUMENTATION
-│   ├── MIGRATION_PLAN.md        Migration strategy (READ THIS FIRST)
-│   ├── README.md                Project overview
-│   ├── STRUCTURE.md             This file
-│   ├── DEVELOPMENT.md           Development workflow
-│   ├── UI_CUSTOMIZATION.md      UI/theming changes (Cursor-like design)
-│   ├── AI_CHAT.md               AI chat implementation details
-│   ├── last_conversation_context.md  Context for next agent
-│   └── archive/                 Outdated docs
+├── scripts/
+│   └── generate-bridge-plugin-source.js Regenerates bridgePluginSource.ts
 │
-├── product.json                 ← Branding (GameDev IDE)
-├── package.json                 ← Dependencies
-├── .env                         ← API keys (not in git)
-├── run.sh                       ← Launch script
-└── [other VSCode files]
+├── extensions/                          EXTENSIONS
+│   └── theme-gamedev-dark/              Custom dark theme (Cursor-like)
+│       ├── package.json
+│       └── themes/
+│           └── gamedev-dark-color-theme.json
+│
+├── docs/                                DOCUMENTATION
+│   ├── README.md                        Project overview
+│   ├── STRUCTURE.md                     This file
+│   ├── DEVELOPMENT.md                   Development workflow
+│   ├── UI_CUSTOMIZATION.md              UI/theming changes
+│   └── UNITY_BRIDGE_PLAN.md             Unity bridge protocol
+│
+├── product.json                         Branding (GameDev IDE)
+├── package.json                         Dependencies
+├── .env                                 API keys (not in git)
+├── run.sh                               Launch script
+└── [other VS Code files]
 ```
 
 ---
 
-## Our Code: Built-in Contributions + Extensions
+## Built-in Contributions
 
-Game development features are implemented as either **built-in workbench contributions** (for deep integration) or **extensions** (for modular features).
+Game development features are implemented as **built-in workbench contributions** (not extensions) for deeper integration with the VS Code UI.
 
-### Built-in: AI Chat (Cursor-style)
+### AI Chat (`gamedevChat/`)
 
 **Location:** `src/vs/workbench/contrib/gamedevChat/browser/`
 
-```
-src/vs/workbench/contrib/gamedevChat/browser/
-├── gamedevChat.contribution.ts  ← View registration & service binding
-├── gamedevChatService.ts        ← Claude API client with streaming
-└── gamedevChatViewPane.ts       ← Chat UI (ViewPane)
-```
+| File | Purpose |
+|------|---------|
+| `gamedevChat.contribution.ts` | Registers the ViewPane, binds services via DI |
+| `gamedevChatService.ts` | Claude API client, streaming, file writing, bridge command execution |
+| `gamedevChatViewPane.ts` | Full chat UI — messages, streaming, file cards, result cards, input |
+| `media/gamedevChat.css` | Styles for shimmer, pulse dots, file cards, code blocks, result cards |
 
-**Why built-in instead of extension?**
-- Deeper integration with VS Code UI
-- Cursor-like feel (appears in auxiliary bar)
-- More control over layout and behavior
+**Skills subdirectory:**
 
-**What it does:**
-- AI chat panel in right sidebar (auxiliary bar)
-- Claude API integration with streaming
-- API key from .env file (dynamic loading)
-- Message persistence
-- Markdown rendering
-
-**See [AI_CHAT.md](./AI_CHAT.md) for complete implementation details.**
-
----
-
-### Extension: Unity Integration
-
-```
-extensions/unity-integration/    (currently named godot-integration)
-├── package.json
-├── src/
-│   ├── extension.ts             ← Entry point
-│   ├── sceneParser.ts           ← Parses .unity YAML files
-│   ├── projectAnalyzer.ts       ← Analyzes Unity project
-│   ├── sceneExplorer.ts         ← TreeDataProvider for GameObjects
-│   ├── inspectorPanel.ts        ← Webview for properties
-│   ├── models/
-│   │   ├── unityScene.ts
-│   │   ├── gameObject.ts
-│   │   └── component.ts
-│   └── webview/                 ← Inspector UI
-│       └── Inspector.tsx
-├── out/
-└── media/
-```
+| File | Purpose |
+|------|---------|
+| `skills/gamedevSkillsRegistry.ts` | Combines all skills into prompt blocks, handles engine detection |
+| `skills/unitySkills.ts` | Unity engine knowledge (component patterns, best practices) |
+| `skills/unityBridgeSkills.ts` | Bridge command format, examples, connection-aware instructions |
 
 **What it does:**
-- Parse Unity .unity scene files (YAML format)
-- Display GameObject hierarchy in TreeView
-- Inspector panel for properties
-- Auto-detect Unity projects
+- Cursor-style AI chat panel in the auxiliary bar (right sidebar)
+- Claude API with streaming responses and extended thinking
+- Two modes: Ask (code blocks with copy) and Agent (auto-writes files + bridge commands)
+- Content stripping in Agent mode (file blocks become file cards, bridge JSON hidden)
+- Real-time apply phase with animated section, timer, and live activity lines
+- File attachments via drag-and-drop and @ mention popup
+- Project context injection from Unity project analysis
+- Message persistence in StorageService
 
-**Source to migrate from:**
-- `GameDevIDE/src/main/services/engine/unity/SceneParser.ts`
-- `GameDevIDE/src/main/services/engine/unity/ProjectAnalyzer.ts`
-- `GameDevIDE/src/renderer/components/engine/SceneViewer.tsx`
+### Unity Integration (`gamedevUnity/`)
 
-**TODO**: Rename `godot-integration` → `unity-integration`
+**Location:** `src/vs/workbench/contrib/gamedevUnity/`
 
----
-
-### Extension: Asset Generation
-
-```
-extensions/asset-generation/
-├── package.json
-├── src/
-│   ├── extension.ts             ← Entry point
-│   ├── pixellabService.ts       ← PixelLab API client
-│   ├── assetBrowser.ts          ← TreeDataProvider for assets
-│   ├── generationPanel.ts       ← Webview for asset generation
-│   ├── assetImporter.ts         ← Import generated assets
-│   └── webview/
-│       ├── GenerationForm.tsx
-│       └── AssetPreview.tsx
-├── out/
-└── media/
-```
+| File | Purpose |
+|------|---------|
+| `common/types.ts` | `IUnityProjectService` interface, project info types |
+| `common/bridgeTypes.ts` | Protocol types, `IUnityBridgeService` interface, constants |
+| `common/bridgePluginSource.ts` | Base64-encoded C# plugin source (auto-generated) |
+| `browser/gamedevUnity.contribution.ts` | Service registration via DI |
+| `browser/unityProjectService.ts` | Unity project detection, structure analysis, context builder |
+| `browser/unityBridgeService.ts` | WebSocket client, port discovery, reconnection, plugin deploy |
 
 **What it does:**
-- Generate game assets via PixelLab API
-- Browse project assets (images, audio)
-- Asset generation UI
-- Auto-import generated assets
+- Detects Unity projects by looking for `ProjectSettings/ProjectVersion.txt`
+- Analyzes project structure (scenes, scripts, prefabs, assets)
+- Builds context message for the AI with project-specific information
+- Auto-deploys the C# bridge plugin to `Assets/Editor/GameDevIDEBridge.cs`
+- Connects to Unity Editor via WebSocket
+- Handles reconnection on Unity domain reloads
+- Shows connection status indicator in chat header
 
-**Source to migrate from:**
-- `GameDevIDE/src/main/services/pixellab/PixelLabService.ts` (has a bug to fix!)
-- `GameDevIDE/src/renderer/components/assets/AssetBrowser.tsx`
-- `GameDevIDE/src/renderer/components/assets/GenerationPanel.tsx`
+### Unity C# Plugin (`unity-editor-plugin/`)
 
----
+**Location:** `unity-editor-plugin/GameDevIDEBridge.cs`
 
-### Extension: Pixel Editor
+A single-file C# plugin that runs inside the Unity Editor. Auto-deployed by the IDE.
 
-```
-extensions/pixel-editor/         (to be created)
-├── package.json
-├── src/
-│   ├── extension.ts             ← Entry point
-│   ├── pixelEditorProvider.ts   ← CustomTextEditorProvider
-│   ├── pixelDocument.ts         ← Document model
-│   └── webview/                 ← Entire pixel editor app
-│       ├── index.tsx            ← Entry point
-│       ├── PixelEditor.tsx      ← Main editor component
-│       ├── Canvas.tsx           ← Canvas rendering
-│       ├── tools/               ← Drawing tools
-│       │   ├── PencilTool.ts
-│       │   ├── EraserTool.ts
-│       │   ├── FillTool.ts
-│       │   ├── LineTool.ts
-│       │   └── ShapeTool.ts
-│       ├── ColorPalette.tsx
-│       ├── LayerPanel.tsx
-│       └── Toolbar.tsx
-├── out/
-└── media/
-```
+**Key capabilities:**
+- WebSocket server on localhost (dynamic port)
+- Writes `Library/GameDevIDE/bridge.json` for port discovery
+- Dispatches JSON commands to Unity Editor APIs
+- `SmartConvert()` for enum/Vector2/Vector3/Color type handling
+- `FindGameObjectByPath()` for inactive GameObject discovery
+- `SetSerializedPropertyValue()` for undo-safe property editing
+- Component type resolution across all loaded assemblies
+- Cleanup on quit and assembly reload
 
-**What it does:**
-- Custom editor for .png files
-- Canvas-based pixel art editing
-- Drawing tools (pencil, eraser, bucket fill, shapes)
-- Color palette
-- Grid overlay
-- Undo/redo
-
-**Source to migrate from:**
-- `GameDevIDE/src/renderer/components/pixel-editor/` (entire directory!)
-- All React components can be reused, just wrapped in webview
-
----
-
-### Extension: Custom Theme
-
-```
-extensions/theme-gamedev-dark/
-├── package.json                 ← Extension manifest
-└── themes/
-    └── gamedev-dark-color-theme.json  ← Full color theme
-```
-
-**What it does:**
-- Provides Cursor-like dark theme as default
-- Near-black backgrounds (#181818, #1e1e1e)
-- Soft blue accent (#7aa2f7)
-- Minimal borders for clean look
-
-**Key design decisions:**
-- NOT pure black (#000000) - too harsh
-- Softer blue accent instead of bright cyan
-- Most borders are transparent
-- Consistent backgrounds across UI
-
-**See [UI_CUSTOMIZATION.md](./UI_CUSTOMIZATION.md) for complete UI theming documentation.**
-
----
-
-## Extension Anatomy
-
-Every VS Code extension has this structure:
-
-### package.json (Extension Manifest)
-
-```json
-{
-  "name": "gamedev-ai",
-  "displayName": "GameDev AI Assistant",
-  "version": "0.1.0",
-  "engines": {
-    "vscode": "^1.85.0"
-  },
-  "activationEvents": [
-    "onStartupFinished"
-  ],
-  "main": "./out/extension.js",
-  "contributes": {
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "gamedev-ai",
-          "title": "GameDev AI",
-          "icon": "media/robot.svg"
-        }
-      ]
-    },
-    "views": {
-      "gamedev-ai": [
-        {
-          "id": "gamedev-ai-chat",
-          "name": "AI Assistant"
-        }
-      ]
-    },
-    "commands": [
-      {
-        "command": "gamedev-ai.openChat",
-        "title": "GameDev AI: Open Chat"
-      }
-    ],
-    "configuration": {
-      "title": "GameDev AI",
-      "properties": {
-        "gamedev.ai.anthropicApiKey": {
-          "type": "string",
-          "description": "Anthropic API key for Claude"
-        }
-      }
-    }
-  }
-}
-```
-
-### extension.ts (Entry Point)
-
-```typescript
-import * as vscode from 'vscode';
-import { ChatProvider } from './chatProvider';
-
-export function activate(context: vscode.ExtensionContext) {
-    console.log('GameDev AI extension activated');
-
-    // Register views
-    const chatProvider = new ChatProvider(context.extensionUri);
-    context.subscriptions.push(
-        vscode.window.registerWebviewViewProvider('gamedev-ai-chat', chatProvider)
-    );
-
-    // Register commands
-    context.subscriptions.push(
-        vscode.commands.registerCommand('gamedev-ai.openChat', () => {
-            vscode.commands.executeCommand('gamedev-ai-chat.focus');
-        })
-    );
-}
-
-export function deactivate() {}
-```
-
----
-
-## How Extensions Load
-
-### 1. VS Code Startup
-```
-./run.sh
-  ↓
-VS Code starts
-  ↓
-Reads extensions/ directory
-  ↓
-Loads all package.json files
-  ↓
-Activates extensions based on activationEvents
-```
-
-### 2. Extension Activation
-```
-activationEvents triggered (e.g., "onStartupFinished")
-  ↓
-extension.ts activate() function runs
-  ↓
-Registers views, commands, providers
-  ↓
-Extension is now active
-```
-
-### 3. User Interaction
-```
-User clicks GameDev AI icon in sidebar
-  ↓
-VS Code calls WebviewViewProvider.resolveWebviewView()
-  ↓
-Extension renders chat UI
-  ↓
-User types message
-  ↓
-Extension calls ClaudeService
-  ↓
-Response displayed in chat
-```
-
----
-
-## Build Process
-
-### TypeScript Compilation
-
+**Regenerate after editing:**
 ```bash
-npm run watch
-```
-
-This runs `tsc --watch` in each extension directory:
-```
-extensions/gamedev-ai/src/extension.ts
-  ↓ TypeScript compiler
-extensions/gamedev-ai/out/extension.js
-```
-
-### Extension Loading
-
-VS Code looks for compiled JavaScript in `out/` directory:
-```
-extensions/gamedev-ai/package.json
-  → "main": "./out/extension.js"
-    → VS Code loads this file
-```
-
-### Webview Bundling
-
-For extensions with React webviews, need webpack/vite:
-```
-extensions/gamedev-ai/src/webview/index.tsx
-  ↓ webpack/vite
-extensions/gamedev-ai/out/webview/bundle.js
-  ↓ loaded by webview HTML
-Renders React app in webview panel
+node scripts/generate-bridge-plugin-source.js
 ```
 
 ---
 
-## Inter-Extension Communication
+## Service Architecture
 
-Extensions can communicate via VS Code's command system:
+All services use VS Code's dependency injection system (`createDecorator` + `registerSingleton`).
 
-```typescript
-// In asset-generation extension
-vscode.commands.executeCommand('gamedev-ai.sendMessage', 'Generate a sword sprite');
-
-// In gamedev-ai extension
-vscode.commands.registerCommand('gamedev-ai.sendMessage', async (message: string) => {
-    // Handle message from other extension
-    await chatService.sendMessage(message);
-});
+```
+IUnityProjectService          Project detection + context
+        │
+        ├── used by ──► IGameDevChatService      AI chat + streaming + agent logic
+        │                       │
+        │                       ├── uses ──► IUnityBridgeService   WebSocket bridge
+        │                       │
+        │                       ├── uses ──► IFileService          File read/write
+        │                       │
+        │                       ├── uses ──► IBulkEditService      Agent file edits
+        │                       │
+        │                       └── uses ──► IEditorService        Open files in editor
+        │
+        └── used by ──► GameDevChatViewPane      Chat UI (ViewPane)
+                                │
+                                ├── uses ──► IMarkdownRendererService
+                                ├── uses ──► ISearchService        @ mention file search
+                                └── uses ──► IClipboardService     Copy buttons
 ```
 
 ---
 
-## Extension Development Workflow
+## Key Patterns
 
-### 1. Edit Code
-```bash
-# Edit files in extensions/*/src/
-code extensions/gamedev-ai/src/extension.ts
+### Streaming Architecture
+
+```
+Claude API (SSE stream)
+    │
+    ├── content_block_start (thinking) ──► StreamingPhase.Thinking
+    ├── content_block_delta (thinking) ──► onDidReceiveChunk (thinking_delta)
+    ├── content_block_stop (thinking) ──► onDidReceiveChunk (thinking_complete)
+    ├── content_block_start (text) ──► StreamingPhase.Responding
+    ├── content_block_delta (text) ──► onDidReceiveChunk (text_delta)
+    ├── message_stop ──► message.isStreaming = false
+    │
+    └── finally block:
+        ├── StreamingPhase.Applying ──► onDidReceiveChunk (phase_change)
+        ├── _applyAgentEdits() ──► onDidApplyActivity (per file)
+        ├── _applyBridgeCommands() ──► onDidApplyActivity (per command)
+        ├── _isStreaming = false
+        └── onDidStopStreaming ──► final render
 ```
 
-### 2. Auto-Compile
-```bash
-# Watch mode compiles on save
-npm run watch
+### Content Stripping (Agent Mode)
+
+In Agent mode, the AI response is processed before display:
+1. File code blocks (`` ```csharp:Assets/Scripts/Foo.cs ... ``` ``) are stripped and replaced with clickable file cards
+2. Bridge JSON blocks (`` ```unity-bridge ... ``` ``) are completely hidden
+3. Bare bridge JSON arrays are removed
+4. The cleaned markdown is rendered
+
+The actual file writing and bridge command execution happen in the apply phase after streaming completes.
+
+### Bridge Command Flow
+
 ```
-
-### 3. Reload
-```bash
-# In the running VS Code window
-Cmd+R  # or "Developer: Reload Window"
-```
-
-### 4. Debug
-```bash
-# Open DevTools
-Cmd+Shift+I
-
-# Check Extension Host logs
-Help → Toggle Developer Tools → Console tab
-Filter by extension name
+AI outputs ```unity-bridge JSON``` in response
+    │
+    ├── During streaming: stripped from display, user sees explanation text only
+    │
+    └── After streaming (apply phase):
+        ├── Parse all bridge command blocks from content
+        ├── If bridge connected: execute each command via WebSocket
+        │   └── Fire onDidApplyActivity for each (start/done/error)
+        └── If bridge disconnected: mark all as skipped
+            └── Results stored on message and shown as bridge result card
 ```
 
 ---
 
 ## Configuration Files
 
-### package.json (Root)
-- VS Code fork metadata
-- Build scripts
-- Dependencies
-
-### extensions/*/package.json
-- Extension manifests
-- Each extension has its own
-- Defines commands, views, settings
-
-### product.json
-- Branding (GameDev IDE)
-- Default settings
-- Application name
-
-### tsconfig.json (per extension)
-- TypeScript compiler settings
-- Target: ES2020
-- Module: CommonJS
+| File | Purpose |
+|------|---------|
+| `product.json` | Branding, default settings, marketplace URL |
+| `package.json` | Root dependencies, build scripts |
+| `.env` | `ANTHROPIC_API_KEY` (not in git) |
+| `extensions/theme-gamedev-dark/package.json` | Theme extension manifest |
 
 ---
 
 ## Naming Conventions
 
 ### Files
-- `extension.ts` - Extension entry point
-- `*Service.ts` - Business logic classes
-- `*Provider.ts` - VS Code providers (TreeView, Webview, etc.)
-- `*.tsx` - React components (webviews)
+- `*Service.ts` — Business logic services (DI-injected)
+- `*ViewPane.ts` — VS Code ViewPane implementations
+- `*.contribution.ts` — Service and view registration
+- `*Types.ts` or `types.ts` — TypeScript interfaces and types
+- `*Skills.ts` — AI skills/knowledge modules
 
-### Classes
-- `FooService` - Services
-- `FooProvider` - Providers
-- `FooPanel` - React components
+### Interfaces
+- `IFooService` — Service interfaces (prefix with I)
+- `IFooEvent` — Event payload interfaces
 
-### Commands
-- `gamedev-ai.openChat` - Namespaced with extension ID
-- `unity.viewScene` - Use category.action pattern
-
----
-
-## Electron App vs VS Code Extension
-
-### File Reading
-
-**Electron:**
-```typescript
-import fs from 'fs';
-const content = fs.readFileSync('/path/to/file', 'utf-8');
-```
-
-**VS Code Extension:**
-```typescript
-import * as vscode from 'vscode';
-const uri = vscode.Uri.file('/path/to/file');
-const bytes = await vscode.workspace.fs.readFile(uri);
-const content = Buffer.from(bytes).toString('utf-8');
-```
-
-### Configuration
-
-**Electron:**
-```typescript
-import Store from 'electron-store';
-const store = new Store();
-const apiKey = store.get('anthropic.apiKey');
-```
-
-**VS Code Extension:**
-```typescript
-import * as vscode from 'vscode';
-const config = vscode.workspace.getConfiguration('gamedev.ai');
-const apiKey = config.get<string>('anthropicApiKey');
-```
-
-### UI
-
-**Electron:**
-```typescript
-// React renders in Electron window
-<div className="chat-panel">
-    <ChatMessages />
-</div>
-```
-
-**VS Code Extension:**
-```typescript
-// React renders in webview
-webviewView.webview.html = getWebviewHtml(webviewView.webview, extensionUri);
-
-// Webview HTML loads React bundle
-<script src="${webviewUri}"></script>
-```
+### Enums
+- `FooState` or `FooPhase` — State enums (PascalCase values)
+- `const enum` preferred for tree-shaking
 
 ---
 
-## Source Locations
-
-### Electron App (Source)
-```
-/Users/azechary/Documents/GitHub/GameDevIDE/
-├── src/main/services/        ← Business logic to port
-├── src/renderer/components/  ← UI components to port
-└── STATUS.md                 ← Feature status (~42% done)
-```
-
-### VS Code Fork (Target)
-```
-/Users/azechary/Documents/GitHub/gamedev-ide/
-├── extensions/               ← Port features here
-└── docs/                     ← Documentation
-```
-
----
-
-## Next Steps
-
-1. **Read** [MIGRATION_PLAN.md](./MIGRATION_PLAN.md) for full strategy
-2. **Port** AI Assistant first (Week 1-2)
-3. **Port** Unity Integration next (Week 3-4)
-4. **Port** Pixel Editor (Week 5-6)
-5. **Port** Asset Generation (Week 7-8)
-
----
-
-**All game dev features live in `extensions/` directory!**
+**Last updated:** 2026-02-28

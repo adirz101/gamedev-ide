@@ -320,6 +320,22 @@ These settings are applied by default via `product.json`:
 
 ---
 
+## Chat UI Components
+
+The AI chat panel (`gamedevChatViewPane.ts`) has its own CSS in `gamedevChat.css` with custom components:
+
+| Component | Description |
+|-----------|-------------|
+| `.gamedev-shimmer` | Animated gradient text for "Thinking...", "Applying..." labels |
+| `.gamedev-pulse-dot` | Pulsing dot for streaming/activity indicators |
+| `.gamedev-code-block` | Code block container with language header and copy button |
+| `.gamedev-file-card` | Compact clickable file reference (Agent mode) |
+| `.gamedev-result-card` | Collapsible card for bridge results and applied files |
+| `.applying-section` | Bordered section with header + timer for apply phase |
+| `.gamedev-mention-popup` | @ mention file search dropdown |
+
+---
+
 ## Future Improvements
 
 ### Not Yet Implemented
@@ -335,7 +351,7 @@ These settings are applied by default via `product.json`:
 
 ---
 
-## Summary for Future Claude Agents
+## Quick Reference
 
 When working on GameDev IDE UI:
 
@@ -346,6 +362,8 @@ When working on GameDev IDE UI:
 5. **Default settings** are in `/product.json` under `configurationDefaults`
 6. **Chat removal** is in `/src/vs/workbench/contrib/chat/browser/chatParticipant.contribution.ts`
 7. **Panel alignment** is in `/src/vs/workbench/browser/layout.ts` (PANEL_ALIGNMENT default)
+8. **Chat UI styles** are in `/src/vs/workbench/contrib/gamedevChat/browser/media/gamedevChat.css`
+9. **Chat UI components** are in `/src/vs/workbench/contrib/gamedevChat/browser/gamedevChatViewPane.ts`
 
 **Always delete `~/.gamedev-ide-dev` when testing default settings changes!**
 
@@ -359,4 +377,4 @@ When working on GameDev IDE UI:
 
 ---
 
-**Last updated**: Session where Cursor-like design was implemented
+**Last updated:** 2026-02-28

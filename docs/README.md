@@ -4,9 +4,9 @@
 
 ---
 
-## 🎯 Project Purpose
+## Project Purpose
 
-GameDev IDE is a fork of Visual Studio Code designed specifically for game developers. Like how [Cursor](https://cursor.com/) deeply integrates AI into VS Code, we're deeply integrating game development tools.
+GameDev IDE is a fork of Visual Studio Code designed specifically for game developers. Like how [Cursor](https://cursor.com/) deeply integrates AI into VS Code, we're deeply integrating game development tools — AI chat, live Unity Editor control, asset generation, and more.
 
 ### What Makes This Different
 
@@ -20,43 +20,19 @@ Game developers get **one unified IDE** with everything integrated.
 
 ---
 
-## 📖 Documentation Structure
-
-### Start Here
-
-**1. [MIGRATION_PLAN.md](./MIGRATION_PLAN.md)** - **READ THIS FIRST**
-- Migration strategy from Electron prototype
-- Feature-by-feature migration map
-- Timeline and priorities
-- Current status and next steps
-
-**2. [STRUCTURE.md](./STRUCTURE.md)** - Extension Organization
-- Where code lives
-- Extension architecture
-- File naming conventions
-- Import patterns
-
-**3. [DEVELOPMENT.md](./DEVELOPMENT.md)** - Development Workflow
-- How to build and run
-- VS Code extension patterns
-- Testing and debugging
-- Common APIs
-
-### Feature-Specific Guides
+## Documentation Structure
 
 | Guide | Purpose | Status |
 |-------|---------|--------|
-| **[MIGRATION_PLAN.md](./MIGRATION_PLAN.md)** | Overall migration strategy | ✅ Current |
-| **[UI_CUSTOMIZATION.md](./UI_CUSTOMIZATION.md)** | UI/theming changes (Cursor-like design) | ✅ Complete |
-| **[AI_CHAT.md](./AI_CHAT.md)** | Built-in AI chat implementation | ✅ Complete |
-| **[last_conversation_context.md](./last_conversation_context.md)** | Context for next development session | ✅ Current |
-| **UNITY_INTEGRATION.md** | Scene viewer migration | 📝 Coming soon |
-| **PIXEL_EDITOR.md** | Pixel art editor migration | 📝 Coming soon |
-| **ASSET_GENERATION.md** | PixelLab integration | 📝 Coming soon |
+| **[README.md](./README.md)** | Project overview (this file) | Current |
+| **[STRUCTURE.md](./STRUCTURE.md)** | File organization and architecture | Current |
+| **[DEVELOPMENT.md](./DEVELOPMENT.md)** | Development workflow and build process | Current |
+| **[UI_CUSTOMIZATION.md](./UI_CUSTOMIZATION.md)** | UI/theming changes (Cursor-like design) | Complete |
+| **[UNITY_BRIDGE_PLAN.md](./UNITY_BRIDGE_PLAN.md)** | Unity Editor Bridge protocol and architecture | Complete |
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 - Node.js 22.22.0 (use fnm: `fnm use 22.22.0`)
@@ -72,7 +48,7 @@ cd /Users/azechary/Documents/GitHub/gamedev-ide
 # Ensure correct Node version
 eval "$(fnm env)" && fnm use 22.22.0
 
-# Install dependencies (already done if you cloned recently)
+# Install dependencies
 npm install
 
 # Start watch mode (auto-compiles on changes)
@@ -88,134 +64,173 @@ npm run watch
 
 ### Make Changes
 
-1. Edit files in `extensions/*/src/`
+1. Edit files in `src/vs/workbench/contrib/gamedev*/`
 2. Watch mode compiles automatically
 3. Reload window in VS Code: **Cmd+R**
 
 ---
 
-## 🗺️ Project Overview
+## Architecture
 
-### Current State
-
-**We have TWO codebases:**
-
-1. **GameDevIDE (Electron App)** - Working prototype
-   - Path: `/Users/azechary/Documents/GitHub/GameDevIDE`
-   - Status: ~42% complete with working features
-   - Has: Unity parser, Claude AI, Pixel editor, PixelLab client
-
-2. **gamedev-ide (VS Code Fork)** - Target platform
-   - Path: `/Users/azechary/Documents/GitHub/gamedev-ide`
-   - Status: Scaffolding ready, features need migration
-   - Has: Extension structure, branding, build system
-
-**Our Goal**: Migrate all working features from Electron → VS Code extensions
-
-### Architecture: VS Code Extensions
+GameDev IDE features are implemented as **built-in workbench contributions** inside the VS Code source tree (not as extensions). This gives deeper integration with the VS Code UI — Cursor-style chat in the sidebar, native service injection, and direct access to the editor APIs.
 
 ```
 gamedev-ide/
-└── extensions/
-    ├── gamedev-ai/              AI Assistant (Claude integration)
-    ├── unity-integration/       Unity scene viewer & parser
-    ├── asset-generation/        PixelLab + Asset browser
-    └── pixel-editor/            Pixel art canvas editor
+└── src/vs/workbench/contrib/
+    ├── gamedevChat/        AI Chat (Cursor-style sidebar panel)
+    │   └── browser/
+    │       ├── gamedevChat.contribution.ts
+    │       ├── gamedevChatService.ts
+    │       ├── gamedevChatViewPane.ts
+    │       ├── skills/
+    │       │   ├── gamedevSkillsRegistry.ts
+    │       │   ├── unityBridgeSkills.ts
+    │       │   └── unitySkills.ts
+    │       └── media/gamedevChat.css
+    │
+    ├── gamedevUnity/       Unity Project Detection & Bridge
+    │   ├── common/
+    │   │   ├── types.ts
+    │   │   ├── bridgeTypes.ts
+    │   │   └── bridgePluginSource.ts
+    │   └── browser/
+    │       ├── gamedevUnity.contribution.ts
+    │       ├── unityProjectService.ts
+    │       └── unityBridgeService.ts
+    │
+    └── [future contributions...]
 ```
 
-Each extension is independent but can communicate via VS Code's Extension API.
+### Unity Editor Plugin
+
+```
+unity-editor-plugin/
+└── GameDevIDEBridge.cs     C# plugin auto-deployed to Unity projects
+```
+
+The plugin source is maintained in the repo root and embedded (base64-encoded) in `bridgePluginSource.ts` for auto-deployment. Regenerate after editing:
+
+```bash
+node scripts/generate-bridge-plugin-source.js
+```
 
 ---
 
-## 🎮 Features Being Migrated
+## Implemented Features
 
-### 1. AI Assistant ✅ (Priority 1)
+### 1. AI Chat (Cursor-style)
 
-**What it does:**
-- Chat with Claude about your game project
-- AI understands Unity project structure
-- Context-aware responses (knows your scenes, scripts, assets)
-- Tool use: AI can modify files and scenes
+**Status: Complete**
 
-**Source:** GameDevIDE's ClaudeService.ts + ContextBuilder.ts
-**Status:** Ready to migrate
+A full-featured AI chat panel in the right sidebar (auxiliary bar), powered by Claude.
 
-### 2. Unity Integration ✅ (Priority 2)
+- **Two modes:**
+  - **Ask mode** — AI responds with code blocks that have copy buttons
+  - **Agent mode** — AI writes files directly to the project and executes Unity bridge commands
+- **Streaming** with real-time markdown rendering (600ms throttle)
+- **Extended thinking** — collapsible "Thought for Xs" section with timer
+- **Phase indicators** — Loading context, Thinking, Responding, Applying changes
+- **File attachments** via drag-and-drop or @ mentions (file search popup)
+- **Content stripping** in Agent mode — file code blocks become compact clickable file cards, bridge JSON is hidden
+- **Bridge result cards** — collapsible cards showing command results with copy button
+- **Applied files cards** — clickable cards showing written/updated files
+- **Applying section** — dedicated section with animated header, timer, and live activity lines during file writes and bridge command execution
+- **Stop button** — cancels streaming mid-response
+- **API key management** — settings dialog, `.env` file support
+- **Message persistence** — chat history stored across sessions
+- **Project context** — Unity project structure, scripts, and configuration injected into system prompt
+- **Auto-scroll** to bottom during streaming and apply phases
 
-**What it does:**
-- Parse Unity .unity scene files (YAML format)
-- Display GameObject hierarchy
-- Inspector panel for properties
-- Auto-detect Unity projects
+**Key files:**
+- `gamedevChatService.ts` — Claude API client, streaming, file writing, bridge command execution
+- `gamedevChatViewPane.ts` — Full chat UI with all rendering logic
+- `gamedevChat.css` — Styles for shimmer, pulse dots, file cards, result cards, code blocks
 
-**Source:** GameDevIDE's SceneParser.ts + ProjectAnalyzer.ts
-**Status:** Parser fully working in Electron
+### 2. Unity Project Detection
 
-### 3. Pixel Art Editor 🎨 (Priority 3)
+**Status: Complete**
 
-**What it does:**
-- Canvas-based pixel art editor
-- Drawing tools: pencil, eraser, bucket fill, shapes
-- Color palette
-- Grid overlay
-- Undo/redo
-- Save as .png
+Automatically detects Unity projects in the workspace and analyzes their structure.
 
-**Source:** GameDevIDE's pixel-editor components
-**Status:** Fully functional in Electron
+- Detects `ProjectSettings/ProjectVersion.txt` to identify Unity projects
+- Parses project structure: scenes, scripts, prefabs, assets
+- Builds context message for the AI with project-specific information
+- Project name shown in context badge on chat input
 
-### 4. Asset Generation 🖼️ (Priority 4)
+**Key files:**
+- `unityProjectService.ts` — Project detection, analysis, context building
+- `types.ts` — `IUnityProjectService` interface
 
-**What it does:**
-- Generate game assets using PixelLab AI
-- Asset browser (view project images/audio)
-- AI can trigger asset generation
-- Auto-import generated assets
+### 3. Unity Editor Bridge
 
-**Source:** GameDevIDE's PixelLabService.ts
-**Status:** Has parsing bug, but structure is good
+**Status: Complete (v1.2.0)**
+
+Live two-way communication between the IDE and a running Unity Editor instance via WebSocket.
+
+- **Auto-deploy C# plugin** to `Assets/Editor/GameDevIDEBridge.cs` when Unity project detected
+- **Port discovery** — Unity plugin writes `Library/GameDevIDE/bridge.json`, IDE polls every 5 seconds
+- **WebSocket connection** with automatic reconnection on Unity domain reloads
+- **Connection status indicator** — green (connected), yellow (connecting), red (disconnected, click to retry)
+- **Stale discovery file detection** — files older than 60s are deleted
+- **Log deduplication** — discovery state transitions only logged once
+- **Manual retry** — click the bridge status indicator when disconnected
+
+**Bridge commands (executed by AI in Agent mode):**
+
+| Category | Actions |
+|----------|---------|
+| **scene** | getActive, getHierarchy, create, load, save |
+| **gameObject** | create, createPrimitive, find, destroy, setActive, setTransform, getSelected |
+| **component** | add, remove, getAll, setProperty |
+| **prefab** | create, instantiate, getAll |
+| **asset** | create, find, import |
+| **editor** | getPlayMode, play, pause, stop, getConsoleLogs, executeMenuItem |
+
+**C# Plugin features (v1.2.0):**
+- `SmartConvert()` — handles enum types (RenderMode, ScaleMode, TextAlignmentOptions), Vector2/3/4, Color (hex + RGBA), bool, int, float
+- `FindGameObjectByPath()` — finds inactive GameObjects by walking the scene hierarchy (Unity's `GameObject.Find()` only finds active objects)
+- `SetSerializedPropertyValue()` — undo-safe property editing via SerializedObject
+- Component type resolution across all loaded assemblies
+- Locale-invariant float parsing
+
+**Key files:**
+- `unityBridgeService.ts` — WebSocket client, discovery polling, reconnection
+- `bridgeTypes.ts` — Protocol types, `IUnityBridgeService` interface, constants
+- `bridgePluginSource.ts` — Base64-encoded C# plugin source (auto-generated)
+- `unity-editor-plugin/GameDevIDEBridge.cs` — The actual C# plugin
+
+### 4. AI Skills System
+
+**Status: Complete**
+
+Structured knowledge base injected into the AI system prompt based on detected engine and connection state.
+
+- **Engine skills** — Unity-specific knowledge (component patterns, best practices)
+- **Bridge skills** — Bridge command format and examples, sent in Agent mode
+  - When connected: tells AI to use bridge commands for scene setup
+  - When disconnected: tells AI to still output bridge commands (marked as pending)
+- **Skills registry** — combines all skills into cached prompt blocks
+
+**Key files:**
+- `gamedevSkillsRegistry.ts` — Registry that builds the full skills prompt
+- `unitySkills.ts` — Unity engine knowledge
+- `unityBridgeSkills.ts` — Bridge command format and instructions
 
 ---
 
-## 📋 Migration Status
+## UI Customization
 
-### Week 1-2: AI Assistant
-- [ ] Port ClaudeService.ts
-- [ ] Port ContextBuilder.ts
-- [ ] Implement chat webview
-- [ ] Add streaming responses
-- [ ] Test with Unity project
+The IDE has a Cursor-like appearance with:
+- Activity bar at the top with centered icons
+- Custom dark theme (GameDev IDE Dark)
+- Clean welcome page
+- VS Code's built-in Copilot chat panel removed
 
-### Week 3-4: Unity Integration
-- [ ] Port SceneParser.ts
-- [ ] Port ProjectAnalyzer.ts
-- [ ] Implement GameObject TreeView
-- [ ] Create inspector panel
-- [ ] Test with real Unity scenes
-
-### Week 5-6: Pixel Editor
-- [ ] Port pixel editor React app
-- [ ] Implement CustomTextEditorProvider
-- [ ] Set up webview build
-- [ ] Test all drawing tools
-
-### Week 7-8: Asset Generation
-- [ ] Port PixelLabService.ts (fix bug!)
-- [ ] Create generation panel
-- [ ] Implement asset browser
-- [ ] Test full workflow
-
-### Week 9-10: Integration & Polish
-- [ ] AI can modify scenes
-- [ ] Asset generation workflow
-- [ ] End-to-end testing
-- [ ] Performance optimization
+See [UI_CUSTOMIZATION.md](./UI_CUSTOMIZATION.md) for complete details.
 
 ---
 
-## 🛠️ Development Workflow
-
-### Daily Development
+## Development Workflow
 
 ```bash
 # Terminal 1: Watch mode (auto-compile)
@@ -224,179 +239,49 @@ npm run watch
 # Terminal 2: Run GameDev IDE
 ./run.sh
 
-# Make changes in extensions/*/src/
+# Make changes in src/vs/workbench/contrib/gamedev*/
 # Reload window: Cmd+R
 # Check DevTools for errors: Cmd+Shift+I
 ```
 
-### Testing Extensions
-
-1. **Launch Development Build**: `./run.sh`
-2. **Open Test Project**: Open a Unity project folder
-3. **Test Features**: Try AI chat, scene viewing, etc.
-4. **Check Console**: Help → Toggle Developer Tools
-
-### Adding New Features
-
-1. **Read** [MIGRATION_PLAN.md](./MIGRATION_PLAN.md) - Understand what we're porting
-2. **Find Source** in GameDevIDE Electron app
-3. **Port Logic** to appropriate extension
-4. **Adapt APIs** from Electron → VS Code
-5. **Test** with real Unity project
-6. **Document** what you did
+See [DEVELOPMENT.md](./DEVELOPMENT.md) for complete development guide.
 
 ---
 
-## 📚 Key Documentation
+## Success Criteria
 
-### Must-Read (In Order)
-
-1. **[MIGRATION_PLAN.md](./MIGRATION_PLAN.md)** - Overall strategy and timeline
-2. **[STRUCTURE.md](./STRUCTURE.md)** - Where everything lives
-3. **[DEVELOPMENT.md](./DEVELOPMENT.md)** - How to develop
-4. **[UI_CUSTOMIZATION.md](./UI_CUSTOMIZATION.md)** - UI/theming changes and file locations
-
-### Reference
-
-- **Electron App Status**: `/Users/azechary/Documents/GitHub/GameDevIDE/STATUS.md`
-- **VS Code Extension API**: https://code.visualstudio.com/api
-- **Webview Guide**: https://code.visualstudio.com/api/extension-guides/webview
-- **TreeView Guide**: https://code.visualstudio.com/api/extension-guides/tree-view
+- [x] VS Code fork compiling and running
+- [x] Cursor-like UI design
+- [x] AI chat with streaming and extended thinking
+- [x] Agent mode with file writing
+- [x] Unity project detection and context
+- [x] Unity Editor Bridge (live scene manipulation)
+- [x] Bridge command execution from AI responses
+- [ ] Pixel art editor
+- [ ] Asset generation (PixelLab integration)
+- [ ] Can say "add health bar" and AI does it all (end-to-end)
 
 ---
 
-## 🎯 Success Criteria
-
-You'll know the migration is successful when:
-
-- ✅ All Electron features work in VS Code
-- ✅ Performance is equal or better
-- ✅ Feels native to VS Code (not bolted-on)
-- ✅ Can say "add health bar" and AI does it all
-- ✅ Unity scenes viewable and editable
-- ✅ Pixel art editor fully functional
-- ✅ Assets generated and integrated automatically
-
----
-
-## 🤔 Why This Approach?
-
-### Why Fork VS Code?
-
-**Pros:**
-- ✅ Developers already use VS Code
-- ✅ Don't have to convince them to switch
-- ✅ Full control over experience
-- ✅ Can add deep integrations
-- ✅ Like Cursor, but for game dev
-
-**vs. Building from Scratch:**
-- ❌ Monaco editor alone is months of work
-- ❌ Terminal, Git, Extensions - all built-in
-- ❌ Mature, stable codebase
-
-### Why Extensions (Not Built-in)?
-
-**Pros:**
-- ✅ Faster development
-- ✅ Well-documented Extension API
-- ✅ Easier to maintain
-- ✅ Can iterate quickly
-- ✅ Users can configure/disable
-
-**vs. Built-in Contributions:**
-- ❌ Built-in requires deep VSCode knowledge
-- ❌ Slower iteration (full recompile)
-- ❌ Harder to maintain across updates
-
-### Why Migrate from Electron?
-
-**Pros:**
-- ✅ Electron prototype already has working features
-- ✅ Can reuse 50-90% of code
-- ✅ Proven architecture
-- ✅ Much faster than starting from scratch
-
----
-
-## 📞 Getting Help
-
-### Documentation
-- Read [MIGRATION_PLAN.md](./MIGRATION_PLAN.md) for strategy
-- Check [DEVELOPMENT.md](./DEVELOPMENT.md) for patterns
-- Look at Electron app for working examples
-
-### Debugging
-- **DevTools**: Cmd+Shift+I
-- **Extension Host**: Check extension logs
-- **Console**: Look for errors
-
-### Reference Code
-- **Electron App**: Working implementation in `/Users/azechary/Documents/GitHub/GameDevIDE`
-- **VS Code Extensions**: Look at built-in extensions in `extensions/`
-
----
-
-## 🚦 Current Status
-
-### ✅ Completed
-- VS Code fork set up and compiling
-- Custom branding applied (GameDev IDE)
-- Cursor-like UI design implemented (see [UI_CUSTOMIZATION.md](./UI_CUSTOMIZATION.md))
-  - Activity bar at top with centered icons
-  - Custom dark theme (GameDev IDE Dark)
-  - Clean welcome page (no walkthroughs)
-  - Extensions marketplace configured (Open VSX)
-- **AI Chat implemented** (see [AI_CHAT.md](./AI_CHAT.md))
-  - Built-in workbench contribution (not extension)
-  - Cursor-style chat in right sidebar (auxiliary bar)
-  - Claude API with streaming responses
-  - API key from .env file (dynamic loading)
-  - Welcome message, markdown rendering
-  - Agent/Auto dropdowns (disabled, placeholder for future)
-- Build system working
-- Documentation written
-
-### 🏗️ In Progress
-- Agent mode implementation
-- Auto mode implementation
-
-### 📋 Next Up
-- Port Unity Integration
-- Port Pixel Editor
-- Port Asset Generation
-
----
-
-## 🎮 Vision
+## Vision
 
 **The Cursor for Game Developers**
 
 A developer says:
 ```
-"Add a health bar UI to the player with smooth animations"
+"Create a main menu with play, settings, and quit buttons"
 ```
 
 GameDev IDE:
-1. 🤖 AI analyzes the Unity project
-2. 🎨 Generates health bar sprite (PixelLab)
-3. 📝 Creates HealthBar.cs script
-4. 🎮 Modifies player GameObject
-5. ✅ Shows preview of changes
-6. 💾 Applies changes on approval
+1. AI analyzes the Unity project
+2. Creates C# scripts (MainMenuManager.cs, SettingsManager.cs)
+3. Creates GameObjects in the scene (Canvas, Buttons, Panels)
+4. Attaches scripts as components
+5. Configures properties (colors, sizes, layout)
+6. All in one response, visible in real-time
 
 **All in one IDE, no context switching.**
 
 ---
 
-## 📖 Next Steps
-
-1. **Read** [MIGRATION_PLAN.md](./MIGRATION_PLAN.md) in full
-2. **Understand** the Electron → VS Code migration strategy
-3. **Start** with AI Assistant migration (Week 1)
-4. **Test** with real Unity project
-5. **Iterate** based on what you learn
-
----
-
-**Let's build the game development IDE developers deserve!** 🎮✨🚀
+**Last updated:** 2026-02-28
