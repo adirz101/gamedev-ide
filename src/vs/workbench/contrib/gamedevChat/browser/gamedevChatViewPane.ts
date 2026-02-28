@@ -78,14 +78,17 @@ export class GameDevChatViewPane extends ViewPane {
 	private streamingThinkingLabelElement: HTMLElement | undefined;
 	private streamingThinkingTimerElement: HTMLElement | undefined;
 	private streamingThinkingTimerInterval: number | undefined;
-	private streamingContentElement: HTMLElement | undefined;
+	private streamingBeforeContentElement: HTMLElement | undefined;
+	private streamingAfterContentElement: HTMLElement | undefined;
 	private streamingFileCardsElement: HTMLElement | undefined;
 	private streamingApplyingElement: HTMLElement | undefined;
 	private streamingApplyingLabelElement: HTMLElement | undefined;
 	private streamingApplyingTimerElement: HTMLElement | undefined;
 	private streamingApplyingTimerInterval: number | undefined;
 	private streamingApplyingContentElement: HTMLElement | undefined;
-	private streamingMarkdownResult: IRenderedMarkdown | undefined;
+	private streamingBeforeMarkdownResult: IRenderedMarkdown | undefined;
+	private streamingAfterMarkdownResult: IRenderedMarkdown | undefined;
+	private lastRenderedFileCardsKey = '';
 	private lastRenderedAssistantContainer: HTMLElement | undefined;
 	private currentStreamingMessageId: string | undefined;
 	private lastRenderedContent = '';
@@ -124,9 +127,9 @@ export class GameDevChatViewPane extends ViewPane {
 		// Post-stream activity (file writes, bridge commands)
 		this._register(this.chatService.onDidApplyActivity((event) => this.onApplyActivity(event)));
 
-		// Throttled markdown re-render (600ms — higher interval reduces lag during streaming)
+		// Throttled markdown re-render (80ms — fast enough for smooth streaming)
 		this.markdownRenderScheduler = this._register(new RunOnceScheduler(
-			() => this.updateStreamingMarkdown(), 600
+			() => this.updateStreamingMarkdown(), 80
 		));
 
 		// Debounced @ mention search (150ms)
@@ -377,8 +380,8 @@ export class GameDevChatViewPane extends ViewPane {
 			font-size: 12px;
 			cursor: pointer;
 		`;
-		this.modeButtonIcon = append(this.modeButton, $('span'));
-		this.modeButtonIcon.style.fontSize = '14px';
+		this.modeButtonIcon = append(this.modeButton, $('span.codicon'));
+		this.modeButtonIcon.style.fontSize = '13px';
 		this.modeButtonText = append(this.modeButton, $('span'));
 		const modeArrow = append(this.modeButton, $('span'));
 		// allow-any-unicode-next-line
@@ -467,24 +470,25 @@ export class GameDevChatViewPane extends ViewPane {
 
 	// --- Content stripping for Agent mode ---
 
-	private _prepareDisplayContent(content: string): { displayContent: string; fileCards: { filePath: string; language: string; isComplete: boolean }[] } {
-		const fileCards: { filePath: string; language: string; isComplete: boolean }[] = [];
+	private _prepareDisplayContent(content: string): { beforeContent: string; afterContent: string; fileCards: { filePath: string; language: string; isComplete: boolean; code?: string }[] } {
+		const fileCards: { filePath: string; language: string; isComplete: boolean; code?: string }[] = [];
+		const PLACEHOLDER = '\x00FILECARD\x00';
 		let cleaned = content;
 
-		// 1. Strip complete file code blocks: ```lang:path/to/file\n...\n```
-		cleaned = cleaned.replace(/```(\w+):([^\n]+)\n[\s\S]*?```/g, (_match, lang: string, path: string) => {
-			fileCards.push({ filePath: path.trim(), language: lang, isComplete: true });
-			return '';
+		// 1. Replace complete file code blocks with a placeholder (preserves position)
+		cleaned = cleaned.replace(/```(\w+):([^\n]+)\n([\s\S]*?)```/g, (_match, lang: string, path: string, code: string) => {
+			fileCards.push({ filePath: path.trim(), language: lang, isComplete: true, code });
+			return PLACEHOLDER;
 		});
 
 		// 2. Check for incomplete file code block at end (during streaming)
 		const incompleteFileMatch = cleaned.match(/```(\w+):([^\n]+)\n[\s\S]*$/);
 		if (incompleteFileMatch) {
 			fileCards.push({ filePath: incompleteFileMatch[2].trim(), language: incompleteFileMatch[1], isComplete: false });
-			cleaned = cleaned.substring(0, incompleteFileMatch.index);
+			cleaned = cleaned.substring(0, incompleteFileMatch.index) + PLACEHOLDER;
 		}
 
-		// 3. Strip complete bridge blocks: ```unity-bridge\n...\n```
+		// 3. Strip complete bridge blocks
 		cleaned = cleaned.replace(/```unity-bridge\s*\n[\s\S]*?```/g, '');
 
 		// 4. Strip incomplete bridge block at end
@@ -493,26 +497,57 @@ export class GameDevChatViewPane extends ViewPane {
 		// 5. Strip bare JSON arrays that look like bridge commands
 		cleaned = cleaned.replace(/\[\s*\{\s*"category"\s*:\s*"(?:gameObject|component|scene|prefab|asset|editor|project)"[\s\S]*?\}\s*\]/g, '');
 
-		// Clean up excessive blank lines left by stripping
-		cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trim();
+		// 6. Split around file card placeholders to get natural before/after ordering
+		const firstIdx = cleaned.indexOf(PLACEHOLDER);
+		let beforeContent: string;
+		let afterContent: string;
 
-		return { displayContent: cleaned, fileCards };
+		if (firstIdx === -1) {
+			beforeContent = cleaned.replace(/\n{3,}/g, '\n\n').trim();
+			afterContent = '';
+		} else {
+			beforeContent = cleaned.substring(0, firstIdx).replace(/\n{3,}/g, '\n\n').trim();
+			const lastIdx = cleaned.lastIndexOf(PLACEHOLDER);
+			afterContent = cleaned.substring(lastIdx + PLACEHOLDER.length).replace(/\n{3,}/g, '\n\n').trim();
+		}
+
+		return { beforeContent, afterContent, fileCards };
 	}
 
-	private renderFileCards(container: HTMLElement, cards: { filePath: string; language: string; isComplete: boolean }[], disposables: DisposableStore): void {
+	private renderFileCards(container: HTMLElement, cards: { filePath: string; language: string; isComplete: boolean; code?: string }[], disposables: DisposableStore): void {
 		for (const card of cards) {
 			const displayLang = GameDevChatViewPane.LANGUAGE_DISPLAY_MAP[card.language] || card.language.toUpperCase();
 			const cardEl = append(container, $(`div.gamedev-file-card${card.isComplete ? '' : '.writing'}`));
 
-			const icon = append(cardEl, $('span.file-icon'));
-			icon.textContent = card.isComplete ? '\uD83D\uDCC4' : '\u23F3'; // 📄 or ⏳
+			// Info row (icon + path + lang badge)
+			const infoRow = append(cardEl, $('div.gamedev-file-card-info'));
+			const icon = append(infoRow, $('span.file-icon.codicon'));
+			if (card.isComplete) {
+				icon.classList.add('codicon-file-code');
+			} else {
+				icon.classList.add('codicon-loading', 'codicon-modifier-spin');
+			}
 
-			const pathEl = append(cardEl, $('span.file-path'));
+			const pathEl = append(infoRow, $('span.file-path'));
 			pathEl.textContent = card.isComplete ? card.filePath : `Writing ${card.filePath}...`;
 
 			if (displayLang) {
-				const langEl = append(cardEl, $('span.file-lang'));
+				const langEl = append(infoRow, $('span.file-lang'));
 				langEl.textContent = displayLang;
+			}
+
+			// Code preview for complete cards
+			if (card.isComplete && card.code) {
+				const nonEmptyLines = card.code.split('\n').filter(l => l.trim());
+				const previewLines = nonEmptyLines.slice(0, 6);
+				if (previewLines.length > 0) {
+					const preview = append(cardEl, $('pre.gamedev-file-preview'));
+					preview.textContent = previewLines.join('\n');
+					if (nonEmptyLines.length > 6) {
+						const more = append(cardEl, $('div.gamedev-file-preview-more'));
+						more.textContent = `\u2026 ${nonEmptyLines.length - 6} more lines`;
+					}
+				}
 			}
 
 			if (card.isComplete) {
@@ -597,16 +632,19 @@ export class GameDevChatViewPane extends ViewPane {
 
 			const copyBtn = document.createElement('button');
 			copyBtn.className = 'gamedev-code-copy-btn';
-			copyBtn.textContent = 'Copy';
+			copyBtn.title = 'Copy code';
+			const copyIcon = document.createElement('span');
+			copyIcon.className = 'codicon codicon-copy';
+			copyBtn.appendChild(copyIcon);
 			header.appendChild(copyBtn);
 
 			disposables.add(addDisposableListener(copyBtn, 'click', async () => {
 				const text = codeEl ? codeEl.textContent || '' : pre.textContent || '';
 				await this.clipboardService.writeText(text);
-				copyBtn.textContent = 'Copied!';
+				copyIcon.className = 'codicon codicon-check';
 				copyBtn.classList.add('copied');
 				setTimeout(() => {
-					copyBtn.textContent = 'Copy';
+					copyIcon.className = 'codicon codicon-copy';
 					copyBtn.classList.remove('copied');
 				}, 1500);
 			}));
@@ -656,13 +694,11 @@ export class GameDevChatViewPane extends ViewPane {
 		}
 		const mode = this.chatService.mode;
 		if (mode === ChatMode.Agent) {
-			// allow-any-unicode-next-line
-			this.modeButtonIcon.textContent = '\u221E';
+			this.modeButtonIcon.className = 'codicon codicon-sparkle';
 			this.modeButtonText.textContent = 'Agent';
 			this.modeButton.title = 'Agent mode: AI writes/edits files in your workspace. Click to switch to Ask mode.';
 		} else {
-			// allow-any-unicode-next-line
-			this.modeButtonIcon.textContent = '\u{1F4AC}';
+			this.modeButtonIcon.className = 'codicon codicon-comment';
 			this.modeButtonText.textContent = 'Ask';
 			this.modeButton.title = 'Ask mode: AI responds in chat with code to copy. Click to switch to Agent mode.';
 		}
@@ -777,11 +813,14 @@ export class GameDevChatViewPane extends ViewPane {
 		this.streamingThinkingElement = append(assistantContainer, $('.thinking-section'));
 		this.streamingThinkingElement.style.display = 'none';
 
-		// Content area for text streaming
-		this.streamingContentElement = append(assistantContainer, $('.message-content'));
+		// Text content before file cards (preamble)
+		this.streamingBeforeContentElement = append(assistantContainer, $('.message-content'));
 
 		// File cards container (for Agent mode — shows compact file cards instead of code)
 		this.streamingFileCardsElement = append(assistantContainer, $('.streaming-file-cards'));
+
+		// Text content after file cards (summary/explanation)
+		this.streamingAfterContentElement = append(assistantContainer, $('.message-content'));
 
 		// Applying section (hidden until apply phase — shows like thinking section with timer)
 		this.streamingApplyingElement = append(assistantContainer, $('div.applying-section'));
@@ -838,9 +877,13 @@ export class GameDevChatViewPane extends ViewPane {
 
 	private teardownStreamingElements(): void {
 		this.streamingDisposables.clear();
-		if (this.streamingMarkdownResult) {
-			this.messageDisposables.add(this.streamingMarkdownResult);
-			this.streamingMarkdownResult = undefined;
+		if (this.streamingBeforeMarkdownResult) {
+			this.messageDisposables.add(this.streamingBeforeMarkdownResult);
+			this.streamingBeforeMarkdownResult = undefined;
+		}
+		if (this.streamingAfterMarkdownResult) {
+			this.messageDisposables.add(this.streamingAfterMarkdownResult);
+			this.streamingAfterMarkdownResult = undefined;
 		}
 		if (this.streamingThinkingTimerInterval) {
 			getWindow(this.messagesContainer).clearInterval(this.streamingThinkingTimerInterval);
@@ -853,7 +896,8 @@ export class GameDevChatViewPane extends ViewPane {
 			getWindow(this.messagesContainer).clearInterval(this.streamingApplyingTimerInterval);
 			this.streamingApplyingTimerInterval = undefined;
 		}
-		this.streamingContentElement = undefined;
+		this.streamingBeforeContentElement = undefined;
+		this.streamingAfterContentElement = undefined;
 		this.streamingFileCardsElement = undefined;
 		this.streamingApplyingElement = undefined;
 		this.streamingApplyingLabelElement = undefined;
@@ -866,6 +910,7 @@ export class GameDevChatViewPane extends ViewPane {
 		this.streamingPhaseElement = undefined;
 		this.currentStreamingMessageId = undefined;
 		this.lastRenderedContent = '';
+		this.lastRenderedFileCardsKey = '';
 		this.userHasScrolled = false;
 	}
 
@@ -890,20 +935,7 @@ export class GameDevChatViewPane extends ViewPane {
 			case StreamingPhase.Applying: {
 				// Hide the simple phase indicator — the applying section takes over
 				this.streamingPhaseElement.style.display = 'none';
-				if (this.streamingApplyingElement) {
-					this.streamingApplyingElement.style.display = 'block';
-					// Reset scroll so user sees the applying section appear
-					this.userHasScrolled = false;
-					// Start timer
-					const applyStartTime = Date.now();
-					const targetWin = getWindow(this.messagesContainer);
-					this.streamingApplyingTimerInterval = targetWin.setInterval(() => {
-						if (this.streamingApplyingTimerElement) {
-							const elapsed = Math.floor((Date.now() - applyStartTime) / 1000);
-							this.streamingApplyingTimerElement.textContent = `${elapsed}s`;
-						}
-					}, 1000);
-				}
+				// Applying section is shown by onApplyActivity when first write fires
 				this.autoScrollToBottom();
 				return;
 			}
@@ -1041,7 +1073,7 @@ export class GameDevChatViewPane extends ViewPane {
 	}
 
 	private updateStreamingMarkdown(): void {
-		if (!this.streamingContentElement) {
+		if (!this.streamingBeforeContentElement) {
 			return;
 		}
 
@@ -1056,46 +1088,65 @@ export class GameDevChatViewPane extends ViewPane {
 			return;
 		}
 
-		// In Agent mode, strip file code blocks and bridge commands from display
 		const isAgent = this.chatService.mode === ChatMode.Agent;
-		let displayContent = content;
-		let fileCards: { filePath: string; language: string; isComplete: boolean }[] = [];
+		let beforeContent = content;
+		let afterContent = '';
+		let fileCards: { filePath: string; language: string; isComplete: boolean; code?: string }[] = [];
 
 		if (isAgent) {
 			const prepared = this._prepareDisplayContent(content);
-			displayContent = prepared.displayContent;
+			beforeContent = prepared.beforeContent;
+			afterContent = prepared.afterContent;
 			fileCards = prepared.fileCards;
 		}
 
-		// Dispose previous markdown render
-		if (this.streamingMarkdownResult) {
-			this.streamingMarkdownResult.dispose();
-			this.streamingMarkdownResult = undefined;
+		// Render "before files" content
+		if (this.streamingBeforeMarkdownResult) {
+			this.streamingBeforeMarkdownResult.dispose();
+			this.streamingBeforeMarkdownResult = undefined;
 		}
-
-		// Render with fillInIncompleteTokens for partial markdown
-		if (displayContent) {
+		if (beforeContent) {
 			const rendered = this.markdownRendererService.render(
-				{ value: displayContent, isTrusted: false },
+				{ value: beforeContent, isTrusted: false },
 				{ fillInIncompleteTokens: true },
 			);
 			this.streamingDisposables.add(rendered);
-			this.streamingMarkdownResult = rendered;
-
-			clearNode(this.streamingContentElement);
-			this.streamingContentElement.appendChild(rendered.element);
+			this.streamingBeforeMarkdownResult = rendered;
+			clearNode(this.streamingBeforeContentElement);
+			this.streamingBeforeContentElement.appendChild(rendered.element);
 		} else {
-			clearNode(this.streamingContentElement);
+			clearNode(this.streamingBeforeContentElement);
 		}
 
-		// Skip enhanceCodeBlocks during streaming for performance.
-		// Code blocks will be enhanced on the final render after streaming completes.
+		// Render "after files" content (summary text that follows file blocks)
+		if (this.streamingAfterContentElement) {
+			if (this.streamingAfterMarkdownResult) {
+				this.streamingAfterMarkdownResult.dispose();
+				this.streamingAfterMarkdownResult = undefined;
+			}
+			if (afterContent) {
+				const rendered = this.markdownRendererService.render(
+					{ value: afterContent, isTrusted: false },
+					{ fillInIncompleteTokens: true },
+				);
+				this.streamingDisposables.add(rendered);
+				this.streamingAfterMarkdownResult = rendered;
+				clearNode(this.streamingAfterContentElement);
+				this.streamingAfterContentElement.appendChild(rendered.element);
+			} else {
+				clearNode(this.streamingAfterContentElement);
+			}
+		}
 
-		// Update file cards in Agent mode
+		// Update file cards only when the card list changes (prevents hover flicker at 80ms)
 		if (isAgent && this.streamingFileCardsElement) {
-			clearNode(this.streamingFileCardsElement);
-			if (fileCards.length > 0) {
-				this.renderFileCards(this.streamingFileCardsElement, fileCards, this.streamingDisposables);
+			const newKey = fileCards.map(c => `${c.filePath}:${c.isComplete}`).join('|');
+			if (newKey !== this.lastRenderedFileCardsKey) {
+				clearNode(this.streamingFileCardsElement);
+				if (fileCards.length > 0) {
+					this.renderFileCards(this.streamingFileCardsElement, fileCards, this.streamingDisposables);
+				}
+				this.lastRenderedFileCardsKey = newKey;
 			}
 		}
 
@@ -1119,6 +1170,25 @@ export class GameDevChatViewPane extends ViewPane {
 		}
 		if (!this.streamingApplyingContentElement) {
 			return;
+		}
+
+		// Show the applying section as soon as the first write starts (may be during Responding phase)
+		if (this.streamingApplyingElement && this.streamingApplyingElement.style.display !== 'block') {
+			this.streamingApplyingElement.style.display = 'block';
+			if (this.streamingPhaseElement) {
+				this.streamingPhaseElement.style.display = 'none';
+			}
+			this.userHasScrolled = false;
+			if (!this.streamingApplyingTimerInterval) {
+				const applyStartTime = Date.now();
+				const targetWin = getWindow(this.messagesContainer);
+				this.streamingApplyingTimerInterval = targetWin.setInterval(() => {
+					if (this.streamingApplyingTimerElement) {
+						const elapsed = Math.floor((Date.now() - applyStartTime) / 1000);
+						this.streamingApplyingTimerElement.textContent = `${elapsed}s`;
+					}
+				}, 1000);
+			}
 		}
 
 		if (event.status === 'start') {
@@ -1306,43 +1376,43 @@ export class GameDevChatViewPane extends ViewPane {
 					this.renderThinkingSection(assistantContainer, message);
 				}
 
-				// Message content (markdown) — strip code/bridge blocks in Agent mode
+				// Message content (markdown) — Agent mode uses before/after split around file cards
 				if (message.content) {
 					const isAgent = this.chatService.mode === ChatMode.Agent;
-					let displayContent = message.content;
-					let fileCards: { filePath: string; language: string; isComplete: boolean }[] = [];
 
 					if (isAgent) {
 						const prepared = this._prepareDisplayContent(message.content);
-						displayContent = prepared.displayContent;
-						fileCards = prepared.fileCards;
-					}
 
-					if (displayContent) {
+						if (prepared.beforeContent) {
+							const beforeEl = append(assistantContainer, $('.message-content'));
+							const rendered = this.markdownRendererService.render({ value: prepared.beforeContent, isTrusted: false });
+							this.messageDisposables.add(rendered);
+							beforeEl.appendChild(rendered.element);
+						}
+
+						if (prepared.fileCards.length > 0) {
+							const fileCardsContainer = append(assistantContainer, $('div.file-cards-container'));
+							this.renderFileCards(fileCardsContainer, prepared.fileCards, this.messageDisposables);
+						}
+
+						if (prepared.afterContent) {
+							const afterEl = append(assistantContainer, $('.message-content'));
+							const rendered = this.markdownRendererService.render({ value: prepared.afterContent, isTrusted: false });
+							this.messageDisposables.add(rendered);
+							afterEl.appendChild(rendered.element);
+						}
+					} else {
 						const contentEl = append(assistantContainer, $('.message-content'));
-						const rendered = this.markdownRendererService.render({
-							value: displayContent,
-							isTrusted: false,
-						});
+						const rendered = this.markdownRendererService.render({ value: message.content, isTrusted: false });
 						this.messageDisposables.add(rendered);
 						contentEl.appendChild(rendered.element);
-
-						// Only enhance code blocks in Ask mode (Agent mode strips file blocks)
-						if (!isAgent) {
-							this.enhanceCodeBlocks(contentEl, this.messageDisposables);
-						}
-					}
-
-					// Render file cards in Agent mode
-					if (isAgent && fileCards.length > 0) {
-						const fileCardsContainer = append(assistantContainer, $('div.file-cards-container'));
-						this.renderFileCards(fileCardsContainer, fileCards, this.messageDisposables);
+						this.enhanceCodeBlocks(contentEl, this.messageDisposables);
 					}
 				}
 
 				// Applied files card
 				if (message.appliedFiles && message.appliedFiles.length > 0) {
-					this.renderAppliedFiles(assistantContainer, message.appliedFiles);
+					this.renderAppliedFiles(assistantContainer, message.id, message.appliedFiles);
 				}
 
 				// Bridge results card
@@ -1428,21 +1498,19 @@ export class GameDevChatViewPane extends ViewPane {
 		}));
 	}
 
-	private renderAppliedFiles(container: HTMLElement, files: IAppliedFileResult[]): void {
+	private renderAppliedFiles(container: HTMLElement, messageId: string, files: IAppliedFileResult[]): void {
 		const card = append(container, $('div.gamedev-result-card'));
 
-		const successCount = files.filter(f => f.status !== 'error').length;
 		const totalCount = files.length;
+		const errorCount = files.filter(f => f.status === 'error').length;
 
 		// Header
 		const header = append(card, $('div.gamedev-result-card-header'));
-		const icon = append(header, $('span.result-icon'));
-		icon.textContent = successCount === totalCount ? '\u2705' : '\u26A0\uFE0F'; // checkmark or warning
+		const icon = append(header, $('span.result-icon.codicon'));
+		icon.classList.add(errorCount === 0 ? 'codicon-check-all' : 'codicon-warning');
 		const summary = append(header, $('span.result-summary'));
 		summary.textContent = `Applied ${totalCount} file ${totalCount === 1 ? 'change' : 'changes'}`;
-		const chevron = append(header, $('span.result-chevron'));
-		// allow-any-unicode-next-line
-		chevron.textContent = '▶';
+		const chevron = append(header, $('span.result-chevron.codicon.codicon-chevron-right'));
 
 		// Body (collapsible)
 		const body = append(card, $('div.gamedev-result-card-body'));
@@ -1458,31 +1526,74 @@ export class GameDevChatViewPane extends ViewPane {
 
 		for (const file of files) {
 			const isError = file.status === 'error';
-			const item = append(body, $(`div.gamedev-result-card-item.${isError ? 'error' : 'success'}.clickable`));
+			const isUndone = file.status === 'undone';
+			const statusClass = isError ? 'error' : isUndone ? 'undone' : 'success';
+			const item = append(body, $(`div.gamedev-result-card-item.${statusClass}${!isError && !isUndone ? '.clickable' : ''}`));
 
-			const itemIcon = append(item, $('span.result-item-icon'));
-			itemIcon.textContent = isError ? '\u2717' : '\u2713'; // X or checkmark
+			const itemIcon = append(item, $('span.result-item-icon.codicon'));
+			if (isError) {
+				itemIcon.classList.add('codicon-close');
+			} else if (isUndone) {
+				itemIcon.classList.add('codicon-discard');
+			} else {
+				itemIcon.classList.add('codicon-check');
+			}
 
 			const label = append(item, $('span.result-item-label'));
-			const verb = file.status === 'created' ? 'Created' : file.status === 'updated' ? 'Updated' : 'Failed';
-			label.textContent = `${verb} ${file.filePath}`;
+			if (isUndone) {
+				label.textContent = `Undone ${file.filePath}`;
+			} else {
+				const verb = file.status === 'created' ? 'Created' : file.status === 'updated' ? 'Updated' : 'Failed';
+				label.textContent = `${verb} ${file.filePath}`;
+			}
 
 			if (isError && file.error) {
 				const errorText = append(item, $('span.result-item-error'));
 				errorText.textContent = file.error;
 			}
 
-			if (!isError) {
+			// Keep / Undo action buttons for successful (non-error, non-undone) files
+			if (!isError && !isUndone) {
+				const actionsEl = append(item, $('div.gamedev-file-actions'));
+
+				const keepBtn = append(actionsEl, $('button.gamedev-file-action-btn.keep'));
+				keepBtn.textContent = 'Keep';
+				keepBtn.title = 'Accept this change';
+
+				const undoBtn = append(actionsEl, $('button.gamedev-file-action-btn.undo'));
+				undoBtn.textContent = 'Undo';
+				undoBtn.title = 'Revert this file to its previous state';
+
+				keepBtn.addEventListener('click', e => {
+					e.stopPropagation();
+					actionsEl.remove();
+				});
+
+				undoBtn.addEventListener('click', async e => {
+					e.stopPropagation();
+					undoBtn.disabled = true;
+					keepBtn.disabled = true;
+					undoBtn.textContent = '\u2026';
+					try {
+						await this.chatService.undoFile(messageId, file.filePath);
+						// onDidUpdateMessages fires → full re-render shows 'undone' state
+					} catch {
+						undoBtn.textContent = 'Undo';
+						undoBtn.disabled = false;
+						keepBtn.disabled = false;
+					}
+				});
+
 				this.messageDisposables.add(addDisposableListener(item, EventType.CLICK, () => {
 					const folders = this.workspaceContextService.getWorkspace().folders;
 					if (folders.length > 0) {
 						const fileUri = URI.joinPath(folders[0].uri, file.filePath);
-						// Use openerService to open the file in the editor
 						this.openerService.open(fileUri);
 					}
 				}));
 			}
 		}
+
 	}
 
 	private renderBridgeResults(container: HTMLElement, results: IBridgeCommandResult[]): void {
@@ -1493,8 +1604,8 @@ export class GameDevChatViewPane extends ViewPane {
 
 		// Header
 		const header = append(card, $('div.gamedev-result-card-header'));
-		const icon = append(header, $('span.result-icon'));
-		icon.textContent = successCount === totalCount ? '\u26A1' : '\u26A0\uFE0F'; // lightning or warning
+		const icon = append(header, $('span.result-icon.codicon'));
+		icon.classList.add(successCount === totalCount ? 'codicon-zap' : 'codicon-warning');
 		const summary = append(header, $('span.result-summary'));
 		summary.textContent = `Applied ${totalCount} Unity bridge ${totalCount === 1 ? 'command' : 'commands'}`;
 		if (successCount < totalCount) {
@@ -1503,7 +1614,8 @@ export class GameDevChatViewPane extends ViewPane {
 
 		// Copy button
 		const copyBtn = append(header, $('button.gamedev-code-copy-btn'));
-		copyBtn.textContent = 'Copy';
+		copyBtn.title = 'Copy results';
+		const copyBtnIcon = append(copyBtn, $('span.codicon.codicon-copy'));
 		this.messageDisposables.add(addDisposableListener(copyBtn, EventType.CLICK, async (e) => {
 			e.stopPropagation(); // Don't toggle collapse
 			const lines = results.map(r => {
@@ -1512,17 +1624,15 @@ export class GameDevChatViewPane extends ViewPane {
 				return r.success ? `${status} ${cmd}` : `${status} ${cmd} \u2014 ${r.error ?? 'failed'}`;
 			});
 			await this.clipboardService.writeText(lines.join('\n'));
-			copyBtn.textContent = 'Copied!';
+			copyBtnIcon.className = 'codicon codicon-check';
 			copyBtn.classList.add('copied');
 			setTimeout(() => {
-				copyBtn.textContent = 'Copy';
+				copyBtnIcon.className = 'codicon codicon-copy';
 				copyBtn.classList.remove('copied');
 			}, 1500);
 		}));
 
-		const chevron = append(header, $('span.result-chevron'));
-		// allow-any-unicode-next-line
-		chevron.textContent = '\u25B6';
+		const chevron = append(header, $('span.result-chevron.codicon.codicon-chevron-right'));
 
 		// Body (collapsible)
 		const body = append(card, $('div.gamedev-result-card-body'));
@@ -1539,8 +1649,8 @@ export class GameDevChatViewPane extends ViewPane {
 		for (const result of results) {
 			const item = append(body, $(`div.gamedev-result-card-item.${result.success ? 'success' : 'error'}`));
 
-			const itemIcon = append(item, $('span.result-item-icon'));
-			itemIcon.textContent = result.success ? '\u2713' : '\u2717'; // checkmark or X
+			const itemIcon = append(item, $('span.result-item-icon.codicon'));
+			itemIcon.classList.add(result.success ? 'codicon-check' : 'codicon-close');
 
 			const label = append(item, $('span.result-item-label'));
 			label.textContent = `${result.category}.${result.action}`;

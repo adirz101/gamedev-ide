@@ -66,8 +66,10 @@ export interface IBridgeCommandResult {
 
 export interface IAppliedFileResult {
 	readonly filePath: string;
-	readonly status: 'created' | 'updated' | 'error';
+	status: 'created' | 'updated' | 'error' | 'undone';
 	readonly error?: string;
+	readonly content?: string;
+	readonly previousContent?: string;
 }
 
 export interface IChatMessage {
@@ -108,6 +110,7 @@ export interface IGameDevChatService {
 	getProjectName(): string | undefined;
 	setApiKey(apiKey: string): void;
 	getApiKey(): string | undefined;
+	undoFile(messageId: string, filePath: string): Promise<void>;
 }
 
 export const IGameDevChatService = createDecorator<IGameDevChatService>('gameDevChatService');
@@ -125,6 +128,8 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 	private _includeProjectContext = true;
 	private _mode: ChatMode = ChatMode.Ask;
 	private _abortController: AbortController | undefined;
+	// Tracks files written during the current stream so we don't double-write in _applyAgentEdits
+	private _writtenFilePaths = new Set<string>();
 
 	private readonly _onDidUpdateMessages = this._register(new Emitter<void>());
 	readonly onDidUpdateMessages = this._onDidUpdateMessages.event;
@@ -224,8 +229,16 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 	}
 
 	private _saveMessages(): void {
-		// Don't save streaming messages
-		const toSave = this._messages.filter(m => !m.isStreaming);
+		// Don't save streaming messages; strip large content fields to avoid storage bloat
+		const toSave = this._messages.filter(m => !m.isStreaming).map(m => {
+			if (!m.appliedFiles) {
+				return m;
+			}
+			return {
+				...m,
+				appliedFiles: m.appliedFiles.map(f => ({ filePath: f.filePath, status: f.status, error: f.error })),
+			};
+		});
 		this.storageService.store(STORAGE_KEY_MESSAGES, JSON.stringify(toSave), StorageScope.PROFILE, StorageTarget.USER);
 	}
 
@@ -327,6 +340,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 
 		// Start streaming
 		this._isStreaming = true;
+		this._writtenFilePaths = new Set();
 		this._abortController = new AbortController();
 		this._onDidStartStreaming.fire();
 
@@ -577,6 +591,12 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 									type: 'text_delta',
 									text,
 								});
+								// Write any newly completed file blocks immediately (non-awaited)
+								if (this._mode === ChatMode.Agent) {
+									this._tryWriteNewCompletedBlocks(assistantMessage).catch(err => {
+										console.error('[GameDevChatService] Incremental write error:', err);
+									});
+								}
 							}
 							break;
 						}
@@ -617,6 +637,67 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		assistantMessage.isStreaming = false;
 		assistantMessage.streamingPhase = StreamingPhase.None;
 		this._onDidUpdateMessages.fire();
+	}
+
+	/** Writes any newly completed file blocks found in the current streamed content. Safe to call many times — idempotent via _writtenFilePaths. */
+	private async _tryWriteNewCompletedBlocks(assistantMessage: IChatMessage): Promise<void> {
+		const blocks = this._parseFileCodeBlocks(assistantMessage.content);
+		const folders = this.workspaceContextService.getWorkspace().folders;
+		if (folders.length === 0) {
+			return;
+		}
+		const workspaceRoot = folders[0].uri;
+
+		for (const block of blocks) {
+			if (this._writtenFilePaths.has(block.filePath)) {
+				continue; // already written
+			}
+			// Mark immediately to prevent concurrent duplicate writes
+			this._writtenFilePaths.add(block.filePath);
+
+			const fileUri = URI.joinPath(workspaceRoot, block.filePath);
+
+			this._onDidApplyActivity.fire({
+				messageId: assistantMessage.id,
+				action: `Writing ${block.filePath}`,
+				status: 'start',
+			});
+
+			try {
+				const exists = await this.fileService.exists(fileUri);
+				if (exists) {
+					const fileContent = await this.fileService.readFile(fileUri);
+					const text = fileContent.value.toString();
+					const lines = text.split('\n');
+					const fullRange = new Range(1, 1, lines.length, lines[lines.length - 1].length + 1);
+					await this.bulkEditService.apply([new ResourceTextEdit(fileUri, { range: fullRange, text: block.code })]);
+					if (!assistantMessage.appliedFiles) { assistantMessage.appliedFiles = []; }
+					assistantMessage.appliedFiles.push({ filePath: block.filePath, status: 'updated', content: block.code, previousContent: text });
+				} else {
+					await this.fileService.createFile(fileUri, VSBuffer.fromString(block.code));
+					if (!assistantMessage.appliedFiles) { assistantMessage.appliedFiles = []; }
+					assistantMessage.appliedFiles.push({ filePath: block.filePath, status: 'created', content: block.code });
+				}
+				await this.editorService.openEditor({ resource: fileUri });
+
+				this._onDidApplyActivity.fire({
+					messageId: assistantMessage.id,
+					action: `Writing ${block.filePath}`,
+					status: 'done',
+				});
+			} catch (error) {
+				const errorMsg = error instanceof Error ? error.message : String(error);
+				if (!assistantMessage.appliedFiles) { assistantMessage.appliedFiles = []; }
+				assistantMessage.appliedFiles.push({ filePath: block.filePath, status: 'error', error: errorMsg });
+
+				this._onDidApplyActivity.fire({
+					messageId: assistantMessage.id,
+					action: `Writing ${block.filePath}`,
+					status: 'error',
+					detail: errorMsg,
+				});
+			}
+		}
 	}
 
 	private async _applyBridgeCommands(content: string, assistantMessage: IChatMessage): Promise<void> {
@@ -761,6 +842,11 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		if (blocks.length === 0) {
 			return;
 		}
+		// Skip any files already written incrementally during streaming
+		const pending = blocks.filter(b => !this._writtenFilePaths.has(b.filePath));
+		if (pending.length === 0) {
+			return;
+		}
 
 		const folders = this.workspaceContextService.getWorkspace().folders;
 		if (folders.length === 0) {
@@ -770,7 +856,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 
 		const results: IAppliedFileResult[] = [];
 
-		for (const block of blocks) {
+		for (const block of pending) {
 			const fileUri = URI.joinPath(workspaceRoot, block.filePath);
 
 			// Fire start activity
@@ -783,16 +869,16 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			try {
 				const exists = await this.fileService.exists(fileUri);
 				if (exists) {
-					// Read existing file to get its full range
+					// Read existing file to get its full range and save for undo
 					const fileContent = await this.fileService.readFile(fileUri);
 					const text = fileContent.value.toString();
 					const lines = text.split('\n');
 					const fullRange = new Range(1, 1, lines.length, lines[lines.length - 1].length + 1);
 					await this.bulkEditService.apply([new ResourceTextEdit(fileUri, { range: fullRange, text: block.code })]);
-					results.push({ filePath: block.filePath, status: 'updated' });
+					results.push({ filePath: block.filePath, status: 'updated', content: block.code, previousContent: text });
 				} else {
 					await this.fileService.createFile(fileUri, VSBuffer.fromString(block.code));
-					results.push({ filePath: block.filePath, status: 'created' });
+					results.push({ filePath: block.filePath, status: 'created', content: block.code });
 				}
 				await this.editorService.openEditor({ resource: fileUri });
 
@@ -817,9 +903,42 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		}
 
 		if (results.length > 0) {
-			assistantMessage.appliedFiles = results;
+			// Merge with files already written incrementally during streaming
+			const existing = assistantMessage.appliedFiles ?? [];
+			assistantMessage.appliedFiles = [...existing, ...results];
 			this._onDidUpdateMessages.fire();
 		}
+	}
+
+	async undoFile(messageId: string, filePath: string): Promise<void> {
+		const message = this._messages.find(m => m.id === messageId);
+		if (!message?.appliedFiles) {
+			return;
+		}
+
+		const fileResult = message.appliedFiles.find(f => f.filePath === filePath);
+		if (!fileResult || fileResult.status === 'error' || fileResult.status === 'undone') {
+			return;
+		}
+
+		const folders = this.workspaceContextService.getWorkspace().folders;
+		if (folders.length === 0) {
+			return;
+		}
+		const workspaceRoot = folders[0].uri;
+		const fileUri = URI.joinPath(workspaceRoot, filePath);
+
+		if (fileResult.status === 'created') {
+			await this.fileService.del(fileUri);
+		} else if (fileResult.status === 'updated' && fileResult.previousContent !== undefined) {
+			const lines = fileResult.previousContent.split('\n');
+			const fullRange = new Range(1, 1, lines.length, lines[lines.length - 1].length + 1);
+			await this.bulkEditService.apply([new ResourceTextEdit(fileUri, { range: fullRange, text: fileResult.previousContent })]);
+		}
+
+		fileResult.status = 'undone';
+		this._saveMessages();
+		this._onDidUpdateMessages.fire();
 	}
 
 	clearMessages(): void {

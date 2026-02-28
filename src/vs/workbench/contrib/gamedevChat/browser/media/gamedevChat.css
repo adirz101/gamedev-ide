@@ -127,25 +127,41 @@
 	background: transparent;
 	border: 1px solid var(--vscode-panel-border);
 	color: var(--vscode-descriptionForeground);
-	padding: 2px 8px;
+	padding: 3px 6px;
 	border-radius: 3px;
-	font-size: 11px;
+	font-size: 13px;
 	cursor: pointer;
 	transition: all 0.15s;
 	display: flex;
 	align-items: center;
-	gap: 4px;
+	line-height: 1;
 }
 
-.gamedev-code-header .gamedev-code-copy-btn:hover {
+.gamedev-code-header .gamedev-code-copy-btn:hover,
+.gamedev-result-card-header .gamedev-code-copy-btn:hover {
 	background: var(--vscode-button-secondaryBackground);
 	color: var(--vscode-button-secondaryForeground);
 	border-color: var(--vscode-button-secondaryBackground);
 }
 
-.gamedev-code-header .gamedev-code-copy-btn.copied {
+.gamedev-code-header .gamedev-code-copy-btn.copied,
+.gamedev-result-card-header .gamedev-code-copy-btn.copied {
 	color: var(--vscode-testing-iconPassed, #73c991);
 	border-color: var(--vscode-testing-iconPassed, #73c991);
+}
+
+.gamedev-result-card-header .gamedev-code-copy-btn {
+	background: transparent;
+	border: 1px solid var(--vscode-panel-border);
+	color: var(--vscode-descriptionForeground);
+	padding: 3px 6px;
+	border-radius: 3px;
+	font-size: 13px;
+	cursor: pointer;
+	transition: all 0.15s;
+	display: flex;
+	align-items: center;
+	line-height: 1;
 }
 
 .gamedev-code-block pre {
@@ -198,8 +214,9 @@
 }
 
 .gamedev-result-card-header .result-icon {
-	font-size: 13px;
+	font-size: 14px;
 	flex-shrink: 0;
+	color: var(--vscode-descriptionForeground);
 }
 
 .gamedev-result-card-header .result-summary {
@@ -207,7 +224,7 @@
 }
 
 .gamedev-result-card-header .result-chevron {
-	font-size: 8px;
+	font-size: 12px;
 	transition: transform 0.15s;
 	color: var(--vscode-descriptionForeground);
 }
@@ -228,8 +245,8 @@
 
 .gamedev-result-card-item .result-item-icon {
 	flex-shrink: 0;
-	font-size: 12px;
-	width: 14px;
+	font-size: 13px;
+	width: 16px;
 	text-align: center;
 }
 
@@ -266,9 +283,7 @@
 /* ===== File cards (Agent mode — compact clickable file references) ===== */
 .gamedev-file-card {
 	display: flex;
-	align-items: center;
-	gap: 8px;
-	padding: 8px 12px;
+	flex-direction: column;
 	margin: 4px 0;
 	border: 1px solid var(--vscode-panel-border);
 	border-radius: 6px;
@@ -276,6 +291,7 @@
 	cursor: pointer;
 	transition: background 0.15s;
 	font-size: 12px;
+	overflow: hidden;
 }
 
 .gamedev-file-card:hover {
@@ -283,9 +299,19 @@
 	border-color: var(--vscode-focusBorder);
 }
 
+/* Info row: icon + path + lang badge */
+.gamedev-file-card-info {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 12px;
+}
+
 .gamedev-file-card .file-icon {
 	font-size: 14px;
 	flex-shrink: 0;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.75;
 }
 
 .gamedev-file-card .file-path {
@@ -307,6 +333,31 @@
 	padding: 1px 6px;
 	border-radius: 3px;
 	flex-shrink: 0;
+}
+
+/* Code preview section */
+.gamedev-file-preview {
+	margin: 0 !important;
+	padding: 6px 12px !important;
+	font-size: 11px !important;
+	line-height: 1.45 !important;
+	background: rgba(0, 0, 0, 0.18) !important;
+	border-top: 1px solid var(--vscode-panel-border);
+	border-radius: 0 !important;
+	overflow: hidden;
+	white-space: pre;
+	color: var(--vscode-descriptionForeground);
+	font-family: var(--vscode-editor-font-family, 'Menlo', 'Monaco', monospace);
+	opacity: 0.85;
+}
+
+.gamedev-file-preview-more {
+	padding: 2px 12px 5px;
+	font-size: 10px;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.45;
+	background: rgba(0, 0, 0, 0.18);
+	font-family: var(--vscode-editor-font-family, 'Menlo', 'Monaco', monospace);
 }
 
 .gamedev-file-card.writing {
@@ -425,4 +476,53 @@
 /* ===== Mode toggle button ===== */
 .gamedev-mode-btn:hover {
 	filter: brightness(1.1);
+}
+
+/* ===== Keep / Undo action buttons inside applied files card ===== */
+.gamedev-file-actions {
+	display: flex;
+	gap: 4px;
+	margin-left: auto;
+	flex-shrink: 0;
+}
+
+.gamedev-file-action-btn {
+	background: transparent;
+	border: 1px solid var(--vscode-panel-border);
+	color: var(--vscode-descriptionForeground);
+	padding: 1px 7px;
+	border-radius: 3px;
+	font-size: 11px;
+	cursor: pointer;
+	transition: all 0.15s;
+}
+
+.gamedev-file-action-btn:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+
+.gamedev-file-action-btn.keep:hover:not(:disabled) {
+	background: rgba(115, 201, 145, 0.12);
+	border-color: var(--vscode-testing-iconPassed, #73c991);
+	color: var(--vscode-testing-iconPassed, #73c991);
+}
+
+.gamedev-file-action-btn.undo:hover:not(:disabled) {
+	background: rgba(244, 135, 113, 0.12);
+	border-color: var(--vscode-testing-iconFailed, #f48771);
+	color: var(--vscode-testing-iconFailed, #f48771);
+}
+
+/* ===== Undone file status in applied files card ===== */
+.gamedev-result-card-item.undone {
+	opacity: 0.5;
+}
+
+.gamedev-result-card-item.undone .result-item-icon {
+	color: var(--vscode-descriptionForeground);
+}
+
+.gamedev-result-card-item.undone .result-item-label {
+	text-decoration: line-through;
 }
