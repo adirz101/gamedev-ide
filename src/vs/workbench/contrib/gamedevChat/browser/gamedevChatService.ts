@@ -18,7 +18,7 @@ import { IBulkEditService, ResourceTextEdit } from '../../../../editor/browser/s
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { Range } from '../../../../editor/common/core/range.js';
-import { BridgeCommandCategory, IUnityBridgeService } from '../../gamedevUnity/common/bridgeTypes.js';
+import { BridgeCommandCategory, IUnityBridgeService, UnityBridgeConnectionState } from '../../gamedevUnity/common/bridgeTypes.js';
 
 export const enum StreamingPhase {
 	None = 0,
@@ -755,9 +755,9 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 
 		// Try multiple patterns — the agent may format bridge commands differently
 		const patterns = [
-			/```unity-bridge\n([\s\S]*?)```/g,                  // Standard: ```unity-bridge\n...\n```
-			/```unity-bridge\s*\n([\s\S]*?)```/g,               // With extra whitespace
-			/```\s*\n(\[\s*\{\s*"category"[\s\S]*?\}\s*\])```/g, // Generic code block with bridge-shaped JSON
+			/```unity-bridge\n([\s\S]*?)```/g,
+			/```unity-bridge\s*\n([\s\S]*?)```/g,
+			/```\s*\n(\[\s*\{\s*"category"[\s\S]*?\}\s*\])```/g,
 		];
 
 		let foundCommands = false;
@@ -776,7 +776,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 				}
 			}
 			if (foundCommands) {
-				break; // Found commands with this pattern, don't try others
+				break;
 			}
 		}
 
@@ -821,42 +821,103 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 				status: 'error',
 				detail: 'Unity Editor not connected',
 			});
-		} else {
-			// Execute commands
-			console.log(`[GameDevChatService] Executing ${allCommands.length} bridge commands`);
-			for (const cmd of allCommands) {
-				const cmdLabel = `${cmd.category}.${cmd.action}`;
-				this._onDidApplyActivity.fire({
-					messageId: assistantMessage.id,
-					action: cmdLabel,
-					status: 'start',
-				});
+			assistantMessage.bridgeResults = results;
+			this._onDidUpdateMessages.fire();
+			return;
+		}
 
+		// Names of C# scripts written this session — used to detect compilation-related failures
+		const writtenScriptNames = new Set(
+			[...this._writtenFilePaths]
+				.filter(p => p.endsWith('.cs'))
+				.map(p => (p.split('/').pop() ?? '').replace('.cs', ''))
+		);
+
+		// Returns true if this bridge error is caused by a script that hasn't compiled yet
+		const isCompilationError = (error: string | undefined): boolean => {
+			if (!error || writtenScriptNames.size === 0) {
+				return false;
+			}
+			// component.add — "Component type not found: MainMenuManager"
+			if (error.includes('Component type not found')) {
+				return true;
+			}
+			// component.setProperty — "Component not found: MainMenuManager on ..."
+			const match = error.match(/Component not found: (\w+)/);
+			if (match && writtenScriptNames.has(match[1])) {
+				return true;
+			}
+			return false;
+		};
+
+		// First pass — execute all commands, track which ones need a compilation retry
+		type RetryEntry = { cmd: typeof allCommands[number]; cmdLabel: string; resultIdx: number };
+		const retryQueue: RetryEntry[] = [];
+
+		console.log(`[GameDevChatService] Executing ${allCommands.length} bridge commands`);
+		for (const cmd of allCommands) {
+			const cmdLabel = `${cmd.category}.${cmd.action}`;
+			this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'start' });
+
+			try {
+				const response = await this.unityBridgeService.sendCommand(
+					cmd.category as BridgeCommandCategory,
+					cmd.action,
+					cmd.params,
+				);
+				console.log(`[GameDevChatService] Bridge response:`, response.success ? 'OK' : response.error);
+				const resultIdx = results.push({ category: cmd.category, action: cmd.action, success: response.success, error: response.error }) - 1;
+
+				if (!response.success && isCompilationError(response.error)) {
+					// Park this command for retry after Unity compiles
+					retryQueue.push({ cmd, cmdLabel, resultIdx });
+					this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'error', detail: response.error });
+				} else {
+					this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: response.success ? 'done' : 'error', detail: response.error });
+				}
+			} catch (cmdError) {
+				const errorMsg = cmdError instanceof Error ? cmdError.message : String(cmdError);
+				results.push({ category: cmd.category, action: cmd.action, success: false, error: errorMsg });
+				this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'error', detail: errorMsg });
+			}
+		}
+
+		// Second pass — if any commands need compilation, wait for Unity's domain reload and retry
+		if (retryQueue.length > 0) {
+			this._onDidApplyActivity.fire({
+				messageId: assistantMessage.id,
+				action: 'Waiting for Unity to compile new scripts',
+				status: 'start',
+			});
+
+			// Flush current results so the UI shows the pending state
+			assistantMessage.bridgeResults = [...results];
+			this._onDidUpdateMessages.fire();
+
+			const outcome = await this._waitForBridgeReconnect(120_000);
+			console.log(`[GameDevChatService] Bridge reconnect outcome: ${outcome}, retrying ${retryQueue.length} commands`);
+
+			this._onDidApplyActivity.fire({
+				messageId: assistantMessage.id,
+				action: 'Compilation done, applying remaining commands',
+				status: 'done',
+			});
+
+			for (const { cmd, cmdLabel, resultIdx } of retryQueue) {
+				this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'start' });
 				try {
 					const response = await this.unityBridgeService.sendCommand(
 						cmd.category as BridgeCommandCategory,
 						cmd.action,
 						cmd.params,
 					);
-					console.log(`[GameDevChatService] Bridge response:`, response.success ? 'OK' : response.error);
-					results.push({ category: cmd.category, action: cmd.action, success: response.success, error: response.error });
-
-					this._onDidApplyActivity.fire({
-						messageId: assistantMessage.id,
-						action: cmdLabel,
-						status: response.success ? 'done' : 'error',
-						detail: response.error,
-					});
-				} catch (cmdError) {
-					const errorMsg = cmdError instanceof Error ? cmdError.message : String(cmdError);
-					results.push({ category: cmd.category, action: cmd.action, success: false, error: errorMsg });
-
-					this._onDidApplyActivity.fire({
-						messageId: assistantMessage.id,
-						action: cmdLabel,
-						status: 'error',
-						detail: errorMsg,
-					});
+					console.log(`[GameDevChatService] Retry response:`, response.success ? 'OK' : response.error);
+					results[resultIdx] = { category: cmd.category, action: cmd.action, success: response.success, error: response.error };
+					this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: response.success ? 'done' : 'error', detail: response.error });
+				} catch (retryError) {
+					const errorMsg = retryError instanceof Error ? retryError.message : String(retryError);
+					results[resultIdx] = { category: cmd.category, action: cmd.action, success: false, error: errorMsg };
+					this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'error', detail: errorMsg });
 				}
 			}
 		}
@@ -865,6 +926,33 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			assistantMessage.bridgeResults = results;
 			this._onDidUpdateMessages.fire();
 		}
+	}
+
+	/**
+	 * Waits for the Unity bridge to go through a disconnect → reconnect cycle,
+	 * which signals that Unity has finished a domain reload (script compilation).
+	 * Resolves with 'reconnected' on success or 'timeout' if the wait exceeds timeoutMs.
+	 */
+	private _waitForBridgeReconnect(timeoutMs: number): Promise<'reconnected' | 'timeout'> {
+		return new Promise(resolve => {
+			// If already disconnected/reconnecting, we've already seen the disconnect
+			let sawDisconnect = this.unityBridgeService.connectionState !== UnityBridgeConnectionState.Connected;
+
+			const timeoutHandle = setTimeout(() => {
+				listener.dispose();
+				resolve('timeout');
+			}, timeoutMs);
+
+			const listener = this.unityBridgeService.onDidChangeConnectionState(state => {
+				if (state === UnityBridgeConnectionState.Disconnected || state === UnityBridgeConnectionState.Reconnecting) {
+					sawDisconnect = true;
+				} else if (state === UnityBridgeConnectionState.Connected && sawDisconnect) {
+					clearTimeout(timeoutHandle);
+					listener.dispose();
+					resolve('reconnected');
+				}
+			});
+		});
 	}
 
 	private _parseFileCodeBlocks(content: string): { filePath: string; language: string; code: string }[] {

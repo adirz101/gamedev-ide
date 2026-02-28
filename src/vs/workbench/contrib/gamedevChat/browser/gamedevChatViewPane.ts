@@ -1683,11 +1683,11 @@ export class GameDevChatViewPane extends ViewPane {
 			if (!isError && !isUndone) {
 				const actionsEl = append(item, $('div.gamedev-file-actions'));
 
-				const keepBtn = append(actionsEl, $('button.gamedev-file-action-btn.keep'));
+				const keepBtn = append(actionsEl, $('button.gamedev-file-action-btn.keep')) as HTMLButtonElement;
 				keepBtn.textContent = 'Keep';
 				keepBtn.title = 'Accept this change';
 
-				const undoBtn = append(actionsEl, $('button.gamedev-file-action-btn.undo'));
+				const undoBtn = append(actionsEl, $('button.gamedev-file-action-btn.undo')) as HTMLButtonElement;
 				undoBtn.textContent = 'Undo';
 				undoBtn.title = 'Revert this file to its previous state';
 

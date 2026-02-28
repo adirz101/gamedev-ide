@@ -6,7 +6,7 @@
  *  the running Unity Editor to create GameObjects, scenes, prefabs, etc.
  *
  *  Protocol version: 1.0
- *  Plugin version: 1.3.0
+ *  Plugin version: 1.3.1
  *--------------------------------------------------------------------------------------------*/
 
 using UnityEngine;
@@ -1077,6 +1077,9 @@ public static class GameDevIDEBridge
     /// Find a GameObject by hierarchy path, including inactive objects.
     /// Unity's GameObject.Find() only finds active objects, which fails when
     /// a parent has been set inactive. This method walks the hierarchy manually.
+    /// If the path contains no '/' separator and no root object matches, falls
+    /// back to a full-scene name search so agents can use bare names like
+    /// "Main Menu Panel" even when the object is a child or inactive.
     /// </summary>
     private static GameObject FindGameObjectByPath(string path)
     {
@@ -1103,13 +1106,47 @@ public static class GameDevIDEBridge
             }
         }
 
-        if (root == null) return null;
+        if (root == null)
+        {
+            // Last resort for single-name queries: deep search across every object in the scene.
+            // Handles inactive children (e.g. a panel hidden under Canvas) that neither
+            // GameObject.Find nor root-only enumeration can locate.
+            if (parts.Length == 1)
+                return FindGameObjectByNameInScene(rootName);
+            return null;
+        }
+
         if (parts.Length == 1) return root;
 
         // Walk down the path using Transform.Find (supports '/' paths and finds inactive children)
         var subPath = string.Join("/", parts, 1, parts.Length - 1);
         var child = root.transform.Find(subPath);
         return child != null ? child.gameObject : null;
+    }
+
+    /// <summary>
+    /// Recursively search every GameObject in the active scene (including inactive)
+    /// and return the first one whose name matches exactly.
+    /// </summary>
+    private static GameObject FindGameObjectByNameInScene(string name)
+    {
+        foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
+        {
+            var result = FindInHierarchyByName(root.transform, name);
+            if (result != null) return result;
+        }
+        return null;
+    }
+
+    private static GameObject FindInHierarchyByName(Transform t, string name)
+    {
+        if (t.name == name) return t.gameObject;
+        foreach (Transform child in t)
+        {
+            var result = FindInHierarchyByName(child, name);
+            if (result != null) return result;
+        }
+        return null;
     }
 
     private static Type FindComponentType(string typeName)
@@ -1151,12 +1188,15 @@ public static class GameDevIDEBridge
         if (underlyingType != null)
             targetType = underlyingType;
 
-        // GameObject reference — resolve by scene path
+        // GameObject reference — resolve by scene path/name, then asset database
         if (targetType == typeof(GameObject))
         {
             var refGo = FindGameObjectByPath(valueStr);
             if (refGo != null) return refGo;
-            return AssetDatabase.LoadAssetAtPath<GameObject>(valueStr);
+            var asset = AssetDatabase.LoadAssetAtPath<GameObject>(valueStr);
+            if (asset != null) return asset;
+            throw new InvalidOperationException(
+                $"Cannot assign reference: '{valueStr}' was not found in the scene hierarchy or the asset database.");
         }
 
         // Component reference — find the GameObject then get the component
@@ -1164,7 +1204,8 @@ public static class GameDevIDEBridge
         {
             var refGo = FindGameObjectByPath(valueStr);
             if (refGo != null) return refGo.GetComponent(targetType);
-            return null;
+            throw new InvalidOperationException(
+                $"Cannot assign reference: '{valueStr}' was not found in the scene hierarchy.");
         }
 
         // Other UnityEngine.Object (Sprite, Material, AudioClip, etc.) — load from asset DB
@@ -1331,8 +1372,9 @@ public static class GameDevIDEBridge
                 prop.colorValue = ParseColor(value);
                 break;
             case SerializedPropertyType.ObjectReference:
-                // value is a scene path (e.g. "Canvas/MainMenuPanel") or an asset path
-                // ("Assets/..."). Try scene first, then asset database.
+            {
+                // value is a scene path/name (e.g. "Main Menu Panel", "Canvas/Panel") or an
+                // asset path ("Assets/..."). Try scene first, then asset database.
                 var refGo = FindGameObjectByPath(value);
                 if (refGo != null)
                 {
@@ -1359,9 +1401,21 @@ public static class GameDevIDEBridge
                     // Try loading from the asset database (sprites, prefabs, materials…)
                     var asset = AssetDatabase.LoadMainAssetAtPath(value);
                     if (asset != null)
+                    {
                         prop.objectReferenceValue = asset;
+                    }
+                    else
+                    {
+                        // Neither scene nor asset database resolved the reference.
+                        // Throw so the caller returns a proper error instead of silently
+                        // leaving the field null and returning success.
+                        throw new InvalidOperationException(
+                            $"Cannot assign reference: '{value}' was not found in the scene hierarchy or the asset database. " +
+                            $"Make sure the GameObject name or path is correct.");
+                    }
                 }
                 break;
+            }
         }
     }
 

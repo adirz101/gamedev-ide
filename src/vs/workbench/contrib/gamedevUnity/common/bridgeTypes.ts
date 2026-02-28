@@ -165,4 +165,4 @@ export const BRIDGE_RECONNECT_DELAY_MS = 3_000;
 export const BRIDGE_DISCOVERY_POLL_MS = 5_000;
 
 /** Maximum reconnection attempts before giving up */
-export const BRIDGE_MAX_RECONNECT_ATTEMPTS = 5;
+export const BRIDGE_MAX_RECONNECT_ATTEMPTS = 15;
