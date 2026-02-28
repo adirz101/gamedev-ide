@@ -6,7 +6,7 @@
  *  the running Unity Editor to create GameObjects, scenes, prefabs, etc.
  *
  *  Protocol version: 1.0
- *  Plugin version: 1.2.0
+ *  Plugin version: 1.3.0
  *--------------------------------------------------------------------------------------------*/
 
 using UnityEngine;
@@ -716,18 +716,35 @@ public static class GameDevIDEBridge
     private static string HandleCreateGameObject(string id, Dictionary<string, string> p)
     {
         var name = p.GetValueOrDefault("name", "GameObject");
-        var go = new GameObject(name);
 
+        // Resolve parent first so we can decide whether a RectTransform is needed
+        GameObject parentGo = null;
         if (p.TryGetValue("parentPath", out var parentPath) && !string.IsNullOrEmpty(parentPath))
-        {
-            var parent = FindGameObjectByPath(parentPath);
-            if (parent != null)
-                go.transform.SetParent(parent.transform, false);
-        }
+            parentGo = FindGameObjectByPath(parentPath);
+
+        // If the parent lives inside a Canvas hierarchy the new object must use RectTransform
+        // so that Unity's UI layout system can position it correctly.
+        bool needsRect = parentGo != null && IsInCanvasHierarchy(parentGo.transform);
+        var go = needsRect ? new GameObject(name, typeof(RectTransform)) : new GameObject(name);
+
+        if (parentGo != null)
+            go.transform.SetParent(parentGo.transform, false);
 
         Undo.RegisterCreatedObjectUndo(go, $"Create {name}");
         Selection.activeGameObject = go;
         return MakeSuccess(id, $"{{\"name\":{EscapeJson(go.name)},\"instanceId\":{go.GetInstanceID()}}}");
+    }
+
+    /// <summary>Returns true if <paramref name="t"/> is the Canvas itself or any of its descendants.</summary>
+    private static bool IsInCanvasHierarchy(Transform t)
+    {
+        while (t != null)
+        {
+            if (t.GetComponent<Canvas>() != null)
+                return true;
+            t = t.parent;
+        }
+        return false;
     }
 
     private static string HandleCreatePrimitive(string id, Dictionary<string, string> p)
@@ -1123,7 +1140,8 @@ public static class GameDevIDEBridge
     }
 
     /// <summary>
-    /// Smart type conversion that handles enums, Vector2, Vector3, Color, and primitives.
+    /// Smart type conversion that handles enums, Vector2, Vector3, Color, primitives,
+    /// and Unity Object references (GameObject/Component by scene path, assets by asset path).
     /// Falls back to Convert.ChangeType for simple types.
     /// </summary>
     private static object SmartConvert(string valueStr, Type targetType)
@@ -1132,6 +1150,26 @@ public static class GameDevIDEBridge
         var underlyingType = Nullable.GetUnderlyingType(targetType);
         if (underlyingType != null)
             targetType = underlyingType;
+
+        // GameObject reference — resolve by scene path
+        if (targetType == typeof(GameObject))
+        {
+            var refGo = FindGameObjectByPath(valueStr);
+            if (refGo != null) return refGo;
+            return AssetDatabase.LoadAssetAtPath<GameObject>(valueStr);
+        }
+
+        // Component reference — find the GameObject then get the component
+        if (typeof(Component).IsAssignableFrom(targetType))
+        {
+            var refGo = FindGameObjectByPath(valueStr);
+            if (refGo != null) return refGo.GetComponent(targetType);
+            return null;
+        }
+
+        // Other UnityEngine.Object (Sprite, Material, AudioClip, etc.) — load from asset DB
+        if (typeof(UnityEngine.Object).IsAssignableFrom(targetType))
+            return AssetDatabase.LoadAssetAtPath(valueStr, targetType);
 
         // Enum types (RenderMode, ScaleMode, TextAlignmentOptions, etc.)
         if (targetType.IsEnum)
@@ -1291,6 +1329,38 @@ public static class GameDevIDEBridge
                 break;
             case SerializedPropertyType.Color:
                 prop.colorValue = ParseColor(value);
+                break;
+            case SerializedPropertyType.ObjectReference:
+                // value is a scene path (e.g. "Canvas/MainMenuPanel") or an asset path
+                // ("Assets/..."). Try scene first, then asset database.
+                var refGo = FindGameObjectByPath(value);
+                if (refGo != null)
+                {
+                    // prop.type returns e.g. "PPtr<$Button>", "PPtr<$GameObject>", "PPtr<$Transform>"
+                    var match = Regex.Match(prop.type, @"PPtr<\$(.+)>");
+                    var expectedTypeName = match.Success ? match.Groups[1].Value : prop.type;
+
+                    if (expectedTypeName == "GameObject")
+                    {
+                        prop.objectReferenceValue = refGo;
+                    }
+                    else
+                    {
+                        // Try to resolve the expected component/object type
+                        var compType = FindComponentType(expectedTypeName);
+                        if (compType != null)
+                            prop.objectReferenceValue = refGo.GetComponent(compType);
+                        else
+                            prop.objectReferenceValue = refGo; // best-effort fallback
+                    }
+                }
+                else
+                {
+                    // Try loading from the asset database (sprites, prefabs, materials…)
+                    var asset = AssetDatabase.LoadMainAssetAtPath(value);
+                    if (asset != null)
+                        prop.objectReferenceValue = asset;
+                }
                 break;
         }
     }
