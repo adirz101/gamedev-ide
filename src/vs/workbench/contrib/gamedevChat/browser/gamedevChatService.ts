@@ -106,6 +106,9 @@ export interface IGameDevChatService {
 	readonly mode: ChatMode;
 	setMode(mode: ChatMode): void;
 	readonly onDidChangeMode: Event<ChatMode>;
+	readonly model: string;
+	setModel(modelId: string): void;
+	readonly onDidChangeModel: Event<string>;
 	hasProjectContext(): boolean;
 	getProjectName(): string | undefined;
 	setApiKey(apiKey: string): void;
@@ -118,6 +121,21 @@ export const IGameDevChatService = createDecorator<IGameDevChatService>('gameDev
 const STORAGE_KEY_MESSAGES = 'gamedevChat.messages';
 const STORAGE_KEY_API_KEY = 'gamedevChat.apiKey';
 const STORAGE_KEY_MODE = 'gamedevChat.mode';
+const STORAGE_KEY_MODEL = 'gamedevChat.model';
+
+export interface IModelOption {
+	readonly id: string;
+	readonly label: string;
+	readonly description: string;
+}
+
+export const AVAILABLE_MODELS: IModelOption[] = [
+	{ id: 'claude-opus-4-20250805', label: 'Opus 4', description: 'Most capable, best for complex tasks' },
+	{ id: 'claude-sonnet-4-20250514', label: 'Sonnet 4', description: 'Balanced – fast and smart (default)' },
+	{ id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', description: 'Fastest and most affordable' },
+];
+
+const DEFAULT_MODEL_ID = 'claude-sonnet-4-20250514';
 
 export class GameDevChatService extends Disposable implements IGameDevChatService {
 	declare readonly _serviceBrand: undefined;
@@ -127,6 +145,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 	private _apiKey: string | undefined;
 	private _includeProjectContext = true;
 	private _mode: ChatMode = ChatMode.Ask;
+	private _model: string = DEFAULT_MODEL_ID;
 	private _abortController: AbortController | undefined;
 	// Tracks files written during the current stream so we don't double-write in _applyAgentEdits
 	private _writtenFilePaths = new Set<string>();
@@ -149,6 +168,9 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 	private readonly _onDidChangeMode = this._register(new Emitter<ChatMode>());
 	readonly onDidChangeMode = this._onDidChangeMode.event;
 
+	private readonly _onDidChangeModel = this._register(new Emitter<string>());
+	readonly onDidChangeModel = this._onDidChangeModel.event;
+
 	constructor(
 		@IStorageService private readonly storageService: IStorageService,
 		@IFileService private readonly fileService: IFileService,
@@ -162,6 +184,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		this._loadMessages();
 		this._loadApiKey();
 		this._loadMode();
+		this._loadModel();
 	}
 
 	get messages(): IChatMessage[] {
@@ -205,6 +228,27 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			this._mode = ChatMode.Agent;
 		} else {
 			this._mode = ChatMode.Ask;
+		}
+	}
+
+	get model(): string {
+		return this._model;
+	}
+
+	setModel(modelId: string): void {
+		if (this._model !== modelId) {
+			this._model = modelId;
+			this.storageService.store(STORAGE_KEY_MODEL, modelId, StorageScope.PROFILE, StorageTarget.USER);
+			this._onDidChangeModel.fire(modelId);
+		}
+	}
+
+	private _loadModel(): void {
+		const stored = this.storageService.get(STORAGE_KEY_MODEL, StorageScope.PROFILE);
+		if (stored && AVAILABLE_MODELS.some(m => m.id === stored)) {
+			this._model = stored;
+		} else {
+			this._model = DEFAULT_MODEL_ID;
 		}
 	}
 
@@ -494,7 +538,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 				'anthropic-beta': 'prompt-caching-2024-07-31,interleaved-thinking-2025-05-14',
 			},
 			body: JSON.stringify({
-				model: 'claude-sonnet-4-20250514',
+				model: this._model,
 				max_tokens: 16000,
 				system: systemBlocks,
 				messages: apiMessages,

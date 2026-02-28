@@ -23,7 +23,7 @@ import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPan
 import { IViewDescriptorService } from '../../../common/views.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
-import { ChatMode, IAppliedFileResult, IApplyActivityEvent, IBridgeCommandResult, IChatMessage, IFileAttachment, IGameDevChatService, IStreamingChunkEvent, StreamingPhase } from './gamedevChatService.js';
+import { AVAILABLE_MODELS, ChatMode, IAppliedFileResult, IApplyActivityEvent, IBridgeCommandResult, IChatMessage, IFileAttachment, IGameDevChatService, IModelOption, IStreamingChunkEvent, StreamingPhase } from './gamedevChatService.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
 import { IUnityProjectService } from '../../gamedevUnity/common/types.js';
@@ -49,6 +49,9 @@ export class GameDevChatViewPane extends ViewPane {
 	private modeButton: HTMLButtonElement | undefined;
 	private modeButtonIcon: HTMLElement | undefined;
 	private modeButtonText: HTMLElement | undefined;
+	private modelButton: HTMLButtonElement | undefined;
+	private modelButtonText: HTMLElement | undefined;
+	private modelPopup: HTMLElement | undefined;
 	private rightToolsContainer: HTMLElement | undefined;
 
 	// Bridge connection indicator
@@ -151,6 +154,9 @@ export class GameDevChatViewPane extends ViewPane {
 
 		// Mode toggle sync
 		this._register(this.chatService.onDidChangeMode(() => this.updateModeButton()));
+
+		// Model selection sync
+		this._register(this.chatService.onDidChangeModel(() => this.updateModelButton()));
 
 		// Bridge connection status
 		this._register(this.unityBridgeService.onDidChangeConnectionState(() => this.updateBridgeStatus()));
@@ -392,6 +398,33 @@ export class GameDevChatViewPane extends ViewPane {
 		this.modeButton.addEventListener('click', () => {
 			const current = this.chatService.mode;
 			this.chatService.setMode(current === ChatMode.Ask ? ChatMode.Agent : ChatMode.Ask);
+		});
+
+		// Model selector button
+		this.modelButton = append(leftTools, $('button.gamedev-model-btn')) as HTMLButtonElement;
+		this.modelButton.style.cssText = `
+			display: flex;
+			align-items: center;
+			gap: 4px;
+			background: transparent;
+			border: 1px solid var(--vscode-panel-border);
+			color: var(--vscode-descriptionForeground);
+			padding: 4px 8px;
+			border-radius: 4px;
+			font-size: 11px;
+			cursor: pointer;
+			transition: all 0.15s;
+		`;
+		this.modelButtonText = append(this.modelButton, $('span'));
+		const modelArrow = append(this.modelButton, $('span'));
+		// allow-any-unicode-next-line
+		modelArrow.textContent = '▾';
+		modelArrow.style.fontSize = '10px';
+		this.updateModelButton();
+
+		this.modelButton.addEventListener('click', (e) => {
+			e.stopPropagation();
+			this.toggleModelPopup();
 		});
 
 		// Right tools container (stop button lives here)
@@ -702,6 +735,100 @@ export class GameDevChatViewPane extends ViewPane {
 			this.modeButtonText.textContent = 'Ask';
 			this.modeButton.title = 'Ask mode: AI responds in chat with code to copy. Click to switch to Agent mode.';
 		}
+	}
+
+	private updateModelButton(): void {
+		if (!this.modelButtonText || !this.modelButton) {
+			return;
+		}
+		const option = AVAILABLE_MODELS.find(m => m.id === this.chatService.model) ?? AVAILABLE_MODELS[1];
+		this.modelButtonText.textContent = option.label;
+		this.modelButton.title = `Model: ${option.label} – ${option.description}\nClick to change model`;
+	}
+
+	private toggleModelPopup(): void {
+		if (this.modelPopup) {
+			this.modelPopup.remove();
+			this.modelPopup = undefined;
+			return;
+		}
+
+		if (!this.modelButton) {
+			return;
+		}
+
+		this.modelPopup = append(this.inputContainer, $('.gamedev-model-popup'));
+		this.modelPopup.style.cssText = `
+			position: absolute;
+			bottom: calc(100% + 4px);
+			left: 0;
+			min-width: 220px;
+			background: var(--vscode-editorSuggestWidget-background, var(--vscode-editor-background));
+			border: 1px solid var(--vscode-editorSuggestWidget-border, var(--vscode-panel-border));
+			border-radius: 6px;
+			z-index: 100;
+			box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+			padding: 4px 0;
+		`;
+
+		for (const option of AVAILABLE_MODELS) {
+			this.appendModelOption(option);
+		}
+
+		// Close popup when clicking outside
+		const cleanup = this._register(addDisposableListener(getWindow(this.inputContainer).document, EventType.CLICK, () => {
+			if (this.modelPopup) {
+				this.modelPopup.remove();
+				this.modelPopup = undefined;
+			}
+			cleanup.dispose();
+		}));
+	}
+
+	private appendModelOption(option: IModelOption): void {
+		if (!this.modelPopup) {
+			return;
+		}
+		const isSelected = this.chatService.model === option.id;
+		const item = append(this.modelPopup, $('.gamedev-model-option'));
+		item.classList.toggle('selected', isSelected);
+		item.style.cssText = `
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			padding: 6px 12px;
+			cursor: pointer;
+		`;
+
+		const checkEl = append(item, $('span.codicon'));
+		checkEl.style.cssText = 'font-size: 13px; width: 16px; flex-shrink: 0;';
+		checkEl.className = isSelected ? 'codicon codicon-check' : 'codicon';
+
+		const textCol = append(item, $('span'));
+		textCol.style.cssText = 'display: flex; flex-direction: column; gap: 1px;';
+
+		const nameEl = append(textCol, $('span'));
+		nameEl.textContent = option.label;
+		nameEl.style.cssText = 'font-size: 12px; font-weight: 500; color: var(--vscode-foreground);';
+
+		const descEl = append(textCol, $('span'));
+		descEl.textContent = option.description;
+		descEl.style.cssText = 'font-size: 11px; color: var(--vscode-descriptionForeground);';
+
+		item.addEventListener('mouseenter', () => {
+			item.style.background = 'var(--vscode-list-hoverBackground, rgba(255,255,255,0.05))';
+		});
+		item.addEventListener('mouseleave', () => {
+			item.style.background = '';
+		});
+		item.addEventListener('click', (e) => {
+			e.stopPropagation();
+			this.chatService.setModel(option.id);
+			if (this.modelPopup) {
+				this.modelPopup.remove();
+				this.modelPopup = undefined;
+			}
+		});
 	}
 
 	private updateBridgeStatus(): void {

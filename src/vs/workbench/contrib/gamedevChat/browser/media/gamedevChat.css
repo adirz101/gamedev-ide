@@ -428,6 +428,23 @@
 	background: var(--vscode-scrollbarSlider-hoverBackground);
 }
 
+/* ===== Model selector button ===== */
+.gamedev-model-btn:hover {
+	background: var(--vscode-button-secondaryBackground) !important;
+	border-color: var(--vscode-focusBorder) !important;
+	color: var(--vscode-foreground) !important;
+}
+
+/* ===== Model selector popup ===== */
+.gamedev-model-popup::-webkit-scrollbar {
+	width: 4px;
+}
+
+.gamedev-model-popup::-webkit-scrollbar-thumb {
+	background: var(--vscode-scrollbarSlider-background);
+	border-radius: 2px;
+}
+
 /* ===== Attachment chips ===== */
 .gamedev-attachment-chip:hover {
 	filter: brightness(1.15);
