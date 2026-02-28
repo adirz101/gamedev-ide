@@ -170,112 +170,58 @@ export class GameDevChatViewPane extends ViewPane {
 			display: flex;
 			align-items: center;
 			justify-content: space-between;
-			padding: 8px 12px;
+			padding: 0 8px;
+			height: 36px;
 			border-bottom: 1px solid var(--vscode-panel-border);
+			flex-shrink: 0;
 		`;
 
 		const headerLeft = append(header, $('.header-left'));
-		headerLeft.style.cssText = 'display: flex; align-items: center; gap: 8px;';
-
-		const headerTitle = append(headerLeft, $('span'));
-		headerTitle.textContent = 'General chat';
-		headerTitle.style.cssText = `
-			font-size: 12px;
-			font-weight: 500;
-			color: var(--vscode-foreground);
-			background: var(--vscode-badge-background);
-			padding: 2px 8px;
-			border-radius: 4px;
-		`;
+		headerLeft.style.cssText = 'display: flex; align-items: center;';
 
 		// Bridge connection status indicator
-		this.bridgeStatusContainer = append(headerLeft, $('div.gamedev-bridge-status'));
+		this.bridgeStatusContainer = append(headerLeft, $('button.gamedev-bridge-status-btn'));
 		this.bridgeStatusContainer.style.cssText = `
 			display: flex;
 			align-items: center;
-			gap: 4px;
-			padding: 2px 8px;
+			gap: 5px;
+			padding: 3px 7px;
 			border-radius: 4px;
+			border: none;
+			background: transparent;
 			font-size: 11px;
 			cursor: default;
+			color: var(--vscode-descriptionForeground);
 		`;
 		this.bridgeStatusDot = append(this.bridgeStatusContainer, $('span'));
 		this.bridgeStatusDot.style.cssText = `
-			width: 7px;
-			height: 7px;
+			width: 6px;
+			height: 6px;
 			border-radius: 50%;
 			flex-shrink: 0;
 		`;
 		this.bridgeStatusLabel = append(this.bridgeStatusContainer, $('span'));
-		this.bridgeStatusLabel.style.cssText = 'white-space: nowrap;';
 		this._register(addDisposableListener(this.bridgeStatusContainer, EventType.CLICK, () => {
 			if (this.unityBridgeService.connectionState === UnityBridgeConnectionState.Disconnected) {
-				this.bridgeStatusLabel!.textContent = 'Unity \u2014 Retrying...';
-				this.bridgeStatusDot!.style.background = '#e2b93d';
 				this.unityBridgeService.retryConnection();
 			}
 		}));
 		this.updateBridgeStatus();
 
-		const headerActions = append(header, $('.header-actions'));
-		headerActions.style.cssText = 'display: flex; gap: 8px;';
+		const headerRight = append(header, $('.header-right'));
+		headerRight.style.cssText = 'display: flex; align-items: center; gap: 1px;';
 
-		const newChatBtn = append(headerActions, $('button'));
-		newChatBtn.textContent = '+';
+		// New chat button
+		const newChatBtn = append(headerRight, $('button.gamedev-header-btn'));
+		append(newChatBtn, $('span.codicon.codicon-add'));
 		newChatBtn.title = 'New chat';
-		newChatBtn.style.cssText = `
-			background: none;
-			border: none;
-			color: var(--vscode-foreground);
-			cursor: pointer;
-			font-size: 16px;
-			padding: 4px 8px;
-			opacity: 0.7;
-		`;
 		newChatBtn.addEventListener('click', () => this.chatService.clearMessages());
 
-		const historyBtn = append(headerActions, $('button'));
-		// allow-any-unicode-next-line
-		historyBtn.textContent = '⏱';
-		historyBtn.title = 'History';
-		historyBtn.style.cssText = `
-			background: none;
-			border: none;
-			color: var(--vscode-foreground);
-			cursor: pointer;
-			font-size: 14px;
-			padding: 4px 8px;
-			opacity: 0.7;
-		`;
-
 		// API Key settings button
-		const settingsBtn = append(headerActions, $('button'));
-		// allow-any-unicode-next-line
-		settingsBtn.textContent = '⚙';
-		settingsBtn.title = 'Set API Key';
-		settingsBtn.style.cssText = `
-			background: none;
-			border: none;
-			color: var(--vscode-foreground);
-			cursor: pointer;
-			font-size: 14px;
-			padding: 4px 8px;
-			opacity: 0.7;
-		`;
+		const settingsBtn = append(headerRight, $('button.gamedev-header-btn'));
+		append(settingsBtn, $('span.codicon.codicon-settings-gear'));
+		settingsBtn.title = 'API Key';
 		settingsBtn.addEventListener('click', () => this.promptForApiKey());
-
-		const moreBtn = append(headerActions, $('button'));
-		moreBtn.textContent = '⋯';
-		moreBtn.title = 'More';
-		moreBtn.style.cssText = `
-			background: none;
-			border: none;
-			color: var(--vscode-foreground);
-			cursor: pointer;
-			font-size: 16px;
-			padding: 4px 8px;
-			opacity: 0.7;
-		`;
 
 		// Messages container
 		this.messagesContainer = append(this.chatContainer, $('.gamedev-chat-messages'));
@@ -492,22 +438,14 @@ export class GameDevChatViewPane extends ViewPane {
 		badge.textContent = '';
 
 		if (hasContext && isEnabled) {
-			// allow-any-unicode-next-line
-			const icon = append(badge, $('span'));
-			icon.textContent = '\u{1F3AE}';
-			icon.style.fontSize = '12px';
 			const label = append(badge, $('span'));
 			label.textContent = projectName || 'Unity';
-			badge.style.background = 'rgba(122, 162, 247, 0.15)';
-			badge.style.borderColor = 'rgba(122, 162, 247, 0.4)';
-			badge.style.color = '#7aa2f7';
+			badge.style.background = 'rgba(157, 132, 245, 0.12)';
+			badge.style.borderColor = 'rgba(157, 132, 245, 0.35)';
+			badge.style.color = '#9d84f5';
 			badge.style.opacity = '1';
-			badge.title = `Project context enabled: ${projectName}\nClick to disable`;
+			badge.title = `Project context: ${projectName}\nClick to disable`;
 		} else if (hasContext && !isEnabled) {
-			// allow-any-unicode-next-line
-			const icon = append(badge, $('span'));
-			icon.textContent = '\u{1F3AE}';
-			icon.style.fontSize = '12px';
 			const label = append(badge, $('span'));
 			label.textContent = projectName || 'Unity';
 			badge.style.background = 'none';
@@ -522,7 +460,7 @@ export class GameDevChatViewPane extends ViewPane {
 			badge.style.borderColor = 'transparent';
 			badge.style.color = 'var(--vscode-descriptionForeground)';
 			badge.style.opacity = '0.4';
-			badge.title = 'No Unity project detected in workspace';
+			badge.title = 'No Unity project detected';
 			badge.style.pointerEvents = 'none';
 		}
 	}
@@ -740,9 +678,8 @@ export class GameDevChatViewPane extends ViewPane {
 			case UnityBridgeConnectionState.Connected:
 				this.bridgeStatusDot.style.background = '#73c991';
 				this.bridgeStatusLabel.textContent = 'Unity';
-				this.bridgeStatusContainer.title = 'Connected to Unity Editor';
-				this.bridgeStatusContainer.style.background = 'rgba(115, 201, 145, 0.1)';
-				this.bridgeStatusLabel.style.color = '#73c991';
+				this.bridgeStatusContainer.title = 'Unity Editor connected';
+				this.bridgeStatusContainer.style.color = '#73c991';
 				this.bridgeStatusContainer.style.cursor = 'default';
 				break;
 			case UnityBridgeConnectionState.Connecting:
@@ -750,16 +687,14 @@ export class GameDevChatViewPane extends ViewPane {
 				this.bridgeStatusDot.style.background = '#e2b93d';
 				this.bridgeStatusLabel.textContent = 'Unity';
 				this.bridgeStatusContainer.title = state === UnityBridgeConnectionState.Connecting ? 'Connecting to Unity Editor...' : 'Reconnecting to Unity Editor...';
-				this.bridgeStatusContainer.style.background = 'rgba(226, 185, 61, 0.1)';
-				this.bridgeStatusLabel.style.color = '#e2b93d';
+				this.bridgeStatusContainer.style.color = '#e2b93d';
 				this.bridgeStatusContainer.style.cursor = 'default';
 				break;
 			default:
 				this.bridgeStatusDot.style.background = '#f48771';
-				this.bridgeStatusLabel.textContent = 'Unity \u2014 Click to retry';
-				this.bridgeStatusContainer.title = 'Not connected to Unity Editor. Click to retry connection, or open Unity to auto-connect.';
-				this.bridgeStatusContainer.style.background = 'rgba(244, 135, 113, 0.08)';
-				this.bridgeStatusLabel.style.color = 'var(--vscode-descriptionForeground)';
+				this.bridgeStatusLabel.textContent = 'Unity';
+				this.bridgeStatusContainer.title = 'Unity not connected \u2014 click to retry';
+				this.bridgeStatusContainer.style.color = 'var(--vscode-descriptionForeground)';
 				this.bridgeStatusContainer.style.cursor = 'pointer';
 				break;
 		}

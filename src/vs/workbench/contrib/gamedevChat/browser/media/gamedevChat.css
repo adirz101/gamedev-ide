@@ -109,7 +109,7 @@
 	align-items: center;
 	justify-content: space-between;
 	padding: 4px 10px;
-	background: rgba(0, 0, 0, 0.15);
+	background: rgba(0, 0, 0, 0.25);
 	border-bottom: 1px solid var(--vscode-panel-border);
 	min-height: 28px;
 }
@@ -166,7 +166,7 @@
 
 /* Inline code styling */
 .gamedev-chat-messages .message-content code:not(pre code) {
-	background: rgba(0, 0, 0, 0.15);
+	background: rgba(0, 0, 0, 0.28);
 	padding: 1px 5px;
 	border-radius: 3px;
 	font-size: 12px;
@@ -178,7 +178,7 @@
 	border-radius: 6px;
 	margin-top: 10px;
 	overflow: hidden;
-	background: rgba(0, 0, 0, 0.05);
+	background: rgba(0, 0, 0, 0.10);
 }
 
 .gamedev-result-card-header {
@@ -272,7 +272,7 @@
 	margin: 4px 0;
 	border: 1px solid var(--vscode-panel-border);
 	border-radius: 6px;
-	background: rgba(0, 0, 0, 0.05);
+	background: rgba(0, 0, 0, 0.12);
 	cursor: pointer;
 	transition: background 0.15s;
 	font-size: 12px;
@@ -303,7 +303,7 @@
 	color: var(--vscode-descriptionForeground);
 	text-transform: uppercase;
 	letter-spacing: 0.3px;
-	background: rgba(0, 0, 0, 0.15);
+	background: rgba(0, 0, 0, 0.28);
 	padding: 1px 6px;
 	border-radius: 3px;
 	flex-shrink: 0;
@@ -315,7 +315,7 @@
 }
 
 .gamedev-file-card.writing:hover {
-	background: rgba(0, 0, 0, 0.05);
+	background: rgba(0, 0, 0, 0.12);
 	border-color: var(--vscode-panel-border);
 }
 
@@ -384,6 +384,37 @@
 
 .gamedev-attachment-chip .gamedev-attachment-remove:hover {
 	opacity: 1 !important;
+}
+
+/* ===== Header icon buttons ===== */
+.gamedev-header-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 26px;
+	height: 26px;
+	background: transparent;
+	border: none;
+	color: var(--vscode-icon-foreground);
+	cursor: pointer;
+	border-radius: 4px;
+	opacity: 0.6;
+	transition: opacity 0.15s, background 0.15s;
+	padding: 0;
+}
+
+.gamedev-header-btn:hover {
+	opacity: 1;
+	background: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.1));
+}
+
+.gamedev-header-btn .codicon {
+	font-size: 14px;
+}
+
+/* ===== Bridge status button ===== */
+.gamedev-bridge-status-btn:hover {
+	background: rgba(255, 255, 255, 0.06) !important;
 }
 
 /* ===== Stop button ===== */

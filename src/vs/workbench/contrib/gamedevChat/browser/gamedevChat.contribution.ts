@@ -26,7 +26,7 @@ const gamedevChatIcon = registerIcon('gamedev-chat-icon', Codicon.sparkle, local
 // Register view container in Auxiliary Bar (right side)
 const viewContainer = Registry.as<IViewContainersRegistry>(ViewExtensions.ViewContainersRegistry).registerViewContainer({
 	id: GAMEDEV_CHAT_VIEW_CONTAINER_ID,
-	title: localize2('gamedevChat', "Agent"),
+	title: localize2('gamedevChat', "Chat"),
 	icon: gamedevChatIcon,
 	ctorDescriptor: new SyncDescriptor(ViewPaneContainer, [GAMEDEV_CHAT_VIEW_CONTAINER_ID, { mergeViewWithContainerWhenSingleView: true }]),
 	storageId: GAMEDEV_CHAT_VIEW_CONTAINER_ID,
@@ -40,14 +40,14 @@ const chatViewDescriptor: IViewDescriptor = {
 	containerIcon: viewContainer.icon,
 	containerTitle: viewContainer.title.value,
 	singleViewPaneContainerTitle: viewContainer.title.value,
-	name: localize2('gamedevChat', "Agent"),
+	name: localize2('gamedevChat', "Chat"),
 	canToggleVisibility: false,
 	canMoveView: true,
 	ctorDescriptor: new SyncDescriptor(GameDevChatViewPane),
 	openCommandActionDescriptor: {
 		id: GAMEDEV_CHAT_OPEN_COMMAND_ID,
 		title: viewContainer.title,
-		mnemonicTitle: localize({ key: 'miToggleAgent', comment: ['&& denotes a mnemonic'] }, "&&Agent"),
+		mnemonicTitle: localize({ key: 'miToggleAgent', comment: ['&& denotes a mnemonic'] }, "&&Chat"),
 		keybindings: {
 			primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyA,
 		},
