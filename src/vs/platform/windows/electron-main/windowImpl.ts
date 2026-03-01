@@ -858,9 +858,17 @@ export class CodeWindow extends BaseWindow implements ICodeWindow {
 			const serviceUrl = URI.parse(this.productService.extensionsGallery.serviceUrl);
 			urls.push(`${serviceUrl.scheme}://${serviceUrl.authority}/*`);
 		}
+		// Localhost WebSocket connections need a proper Origin header so that
+		// servers validating Origin (e.g. Unity MPE ChannelService) accept them.
+		// The browser sends 'vscode-file://vscode-app' which such servers reject.
+		urls.push('ws://127.0.0.1/*');
 		this._win.webContents.session.webRequest.onBeforeSendHeaders({ urls }, async (details, cb) => {
-			const headers = await this.getMarketplaceHeaders();
+			if (details.url.startsWith('ws://127.0.0.1')) {
+				details.requestHeaders['Origin'] = 'http://127.0.0.1';
+				return cb({ cancel: false, requestHeaders: details.requestHeaders });
+			}
 
+			const headers = await this.getMarketplaceHeaders();
 			cb({ cancel: false, requestHeaders: Object.assign(details.requestHeaders, headers) });
 		});
 	}

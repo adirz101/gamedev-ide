@@ -123,6 +123,45 @@ const STORAGE_KEY_API_KEY = 'gamedevChat.apiKey';
 const STORAGE_KEY_MODE = 'gamedevChat.mode';
 const STORAGE_KEY_MODEL = 'gamedevChat.model';
 
+/** Tool definition for the Anthropic API — allows the model to execute Unity bridge commands mid-conversation. */
+const UNITY_BRIDGE_TOOL = {
+	name: 'unity_bridge',
+	description: 'Execute commands in the Unity Editor to create GameObjects, add components, set transforms, manage scenes, and control the editor. Use this for all scene construction.',
+	input_schema: {
+		type: 'object' as const,
+		properties: {
+			commands: {
+				type: 'array' as const,
+				description: 'Array of bridge commands to execute sequentially in Unity',
+				items: {
+					type: 'object' as const,
+					properties: {
+						category: {
+							type: 'string' as const,
+							enum: ['scene', 'gameObject', 'component', 'prefab', 'asset', 'editor', 'project'],
+						},
+						action: { type: 'string' as const },
+						params: { type: 'object' as const },
+					},
+					required: ['category', 'action'],
+				},
+			},
+		},
+		required: ['commands'],
+	},
+};
+
+/** Content block tracked during streaming — supports thinking (with signature), text, and tool_use blocks. */
+interface IStreamedContentBlock {
+	type: 'thinking' | 'text' | 'tool_use';
+	thinking: string;
+	signature: string;
+	text: string;
+	toolUseId: string;
+	toolUseName: string;
+	toolInputJson: string;
+}
+
 export interface IModelOption {
 	readonly id: string;
 	readonly label: string;
@@ -417,9 +456,8 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		} finally {
 			this._abortController = undefined;
 
-			// In Agent mode, keep streaming state alive and show activity during apply phase
+			// In Agent mode, apply any remaining file edits not written during streaming
 			if (this._mode === ChatMode.Agent && assistantMessage.content) {
-				// Signal Applying phase so the UI shows activity indicators
 				assistantMessage.streamingPhase = StreamingPhase.Applying;
 				this._onDidReceiveChunk.fire({
 					messageId: assistantMessage.id,
@@ -428,20 +466,25 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 				});
 
 				await this._applyAgentEdits(assistantMessage.content, assistantMessage);
-				await this._applyBridgeCommands(assistantMessage.content, assistantMessage);
 			}
 
+			assistantMessage.isStreaming = false;
+			assistantMessage.streamingPhase = StreamingPhase.None;
 			this._isStreaming = false;
 			this._onDidStopStreaming.fire();
+			this._onDidUpdateMessages.fire();
 			this._saveMessages();
 		}
 	}
 
+	/**
+	 * Orchestrates the agentic loop: makes API calls, handles tool_use responses
+	 * (executes bridge commands), sends tool_result back, and repeats until the
+	 * model produces a final end_turn response.
+	 */
 	private async _streamResponse(assistantMessage: IChatMessage, includeContext: boolean, augmentedContent?: string): Promise<void> {
 		// Build messages array for API
-		// Note: thinking blocks require a signature for multi-turn which we don't store,
-		// so we only send the text content for previous assistant messages.
-		const apiMessages = this._messages
+		const apiMessages: Array<{ role: string; content: unknown }> = this._messages
 			.filter(m => !m.isStreaming)
 			.map(m => ({
 				role: m.role as 'user' | 'assistant',
@@ -456,12 +499,100 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			}
 		}
 
-		// Build system message as blocks for prompt caching
+		// Build system message blocks
+		const systemBlocks = this._buildSystemBlocks(includeContext);
+
+		// Tools are only available in Agent mode
+		const tools = this._mode === ChatMode.Agent ? [UNITY_BRIDGE_TOOL] : undefined;
+
+		// Fire loading context phase
+		this._onDidReceiveChunk.fire({
+			messageId: assistantMessage.id,
+			type: 'phase_change',
+			phase: StreamingPhase.LoadingContext,
+		});
+
+		// Thinking timing state (shared across loop iterations)
+		const thinkingState = { startTime: Date.now(), finalized: false };
+
+		// Agentic loop — continues while the model wants to call tools
+		while (true) {
+			if (this._abortController?.signal.aborted) {
+				break;
+			}
+
+			const { contentBlocks, stopReason } = await this._processApiStream(
+				systemBlocks, apiMessages, tools, assistantMessage, thinkingState,
+			);
+
+			if (stopReason !== 'tool_use') {
+				// Model is done (end_turn, max_tokens, etc.)
+				break;
+			}
+
+			// Model wants to call tools — build assistant content for the API
+			const assistantContent: unknown[] = contentBlocks.map(block => {
+				switch (block.type) {
+					case 'thinking':
+						return { type: 'thinking', thinking: block.thinking, signature: block.signature };
+					case 'text':
+						return { type: 'text', text: block.text };
+					case 'tool_use':
+						return {
+							type: 'tool_use',
+							id: block.toolUseId,
+							name: block.toolUseName,
+							input: JSON.parse(block.toolInputJson || '{}'),
+						};
+					default:
+						return { type: 'text', text: '' };
+				}
+			});
+
+			apiMessages.push({ role: 'assistant', content: assistantContent });
+
+			// Execute tool calls and collect results
+			const toolResultContent: Array<{ type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }> = [];
+
+			for (const block of contentBlocks.filter(b => b.type === 'tool_use')) {
+				if (this._abortController?.signal.aborted) {
+					toolResultContent.push({
+						type: 'tool_result',
+						tool_use_id: block.toolUseId,
+						content: JSON.stringify({ success: false, error: 'Cancelled by user' }),
+						is_error: true,
+					});
+					continue;
+				}
+
+				const result = await this._executeBridgeTool(block, assistantMessage);
+				toolResultContent.push({
+					type: 'tool_result',
+					tool_use_id: block.toolUseId,
+					content: result.text,
+					is_error: result.isError,
+				});
+			}
+
+			apiMessages.push({ role: 'user', content: toolResultContent });
+
+			if (this._abortController?.signal.aborted) {
+				break;
+			}
+		}
+
+		// Finalize message
+		assistantMessage.isStreaming = false;
+		assistantMessage.streamingPhase = StreamingPhase.None;
+		this._onDidUpdateMessages.fire();
+	}
+
+	/** Builds system message blocks for the API request (prompt caching, project context, skills). */
+	private _buildSystemBlocks(includeContext: boolean): Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> {
 		const projectInfo = this.unityProjectService.currentProject;
 		const isUnity = projectInfo?.isUnityProject;
 		const projectName = projectInfo?.projectName;
 
-		// Build project-awareness preamble
 		let projectPreamble = '';
 		if (isUnity && projectName) {
 			projectPreamble = `\n\nYou are working directly inside the user's Unity project "${projectName}". You have full access to the project structure, scripts, and configuration. Reference specific project files and structures when relevant. The user trusts you as their expert Unity co-developer — be confident and specific, not generic.`;
@@ -478,13 +609,9 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 
 		const basePrompt = 'You are an expert AI assistant for game development, embedded directly in the user\'s IDE. You help with Unity, Godot, C#, GDScript, game design, architecture patterns, and general programming questions. Give accurate, production-quality advice. When writing code, follow engine best practices and avoid common pitfalls.' + projectPreamble + modeInstructions;
 		const systemBlocks: Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> = [
-			{
-				type: 'text',
-				text: basePrompt,
-			}
+			{ type: 'text', text: basePrompt }
 		];
 
-		// Engine skills knowledge base — sent as a CACHED block
 		const detectedEngine = this.unityProjectService.currentProject?.isUnityProject
 			? GameEngine.Unity
 			: GameEngine.Unknown;
@@ -497,17 +624,12 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			});
 		}
 
-		// Unity Bridge skills — always sent in Agent mode with connection status
 		if (this._mode === ChatMode.Agent) {
 			const isConnected = this.unityBridgeService.isConnected;
 			const bridgeSkills = getUnityBridgeSkills(isConnected);
-			systemBlocks.push({
-				type: 'text',
-				text: bridgeSkills,
-			});
+			systemBlocks.push({ type: 'text', text: bridgeSkills });
 		}
 
-		// Project context is sent as a CACHED block
 		if (includeContext) {
 			const projectContext = this.unityProjectService.buildContextMessage();
 			if (projectContext) {
@@ -519,15 +641,35 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			}
 		}
 
-		// Fire loading context phase
-		this._onDidReceiveChunk.fire({
-			messageId: assistantMessage.id,
-			type: 'phase_change',
-			phase: StreamingPhase.LoadingContext,
-		});
+		return systemBlocks;
+	}
 
-		// Make API request with streaming, prompt caching, and extended thinking
-		// Note: temperature cannot be set when thinking is enabled
+	/**
+	 * Processes a single streaming API call. Returns the content blocks and stop reason.
+	 * Updates assistantMessage with text/thinking content as it streams.
+	 */
+	private async _processApiStream(
+		systemBlocks: Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }>,
+		apiMessages: Array<{ role: string; content: unknown }>,
+		tools: unknown[] | undefined,
+		assistantMessage: IChatMessage,
+		thinkingState: { startTime: number; finalized: boolean },
+	): Promise<{ contentBlocks: IStreamedContentBlock[]; stopReason: string }> {
+		const body: Record<string, unknown> = {
+			model: this._model,
+			max_tokens: 16000,
+			system: systemBlocks,
+			messages: apiMessages,
+			stream: true,
+			thinking: {
+				type: 'enabled',
+				budget_tokens: 10000,
+			},
+		};
+		if (tools) {
+			body.tools = tools;
+		}
+
 		const response = await fetch('https://api.anthropic.com/v1/messages', {
 			method: 'POST',
 			headers: {
@@ -537,17 +679,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 				'anthropic-dangerous-direct-browser-access': 'true',
 				'anthropic-beta': 'prompt-caching-2024-07-31,interleaved-thinking-2025-05-14',
 			},
-			body: JSON.stringify({
-				model: this._model,
-				max_tokens: 16000,
-				system: systemBlocks,
-				messages: apiMessages,
-				stream: true,
-				thinking: {
-					type: 'enabled',
-					budget_tokens: 10000,
-				},
-			}),
+			body: JSON.stringify(body),
 			signal: this._abortController?.signal,
 		});
 
@@ -563,11 +695,8 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 
 		const decoder = new TextDecoder();
 		let buffer = '';
-
-		// Extended thinking state tracking
-		let currentBlockType: 'thinking' | 'text' | null = null;
-		const thinkingStartTime = Date.now();
-		let thinkingFinalized = false;
+		let stopReason = 'end_turn';
+		const contentBlocks: IStreamedContentBlock[] = [];
 
 		while (true) {
 			const { done, value } = await reader.read();
@@ -594,8 +723,17 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 					switch (parsed.type) {
 						case 'content_block_start': {
 							const blockType = parsed.content_block?.type;
+							const block: IStreamedContentBlock = {
+								type: blockType ?? 'text',
+								thinking: '',
+								signature: '',
+								text: '',
+								toolUseId: '',
+								toolUseName: '',
+								toolInputJson: '',
+							};
+
 							if (blockType === 'thinking') {
-								currentBlockType = 'thinking';
 								assistantMessage.streamingPhase = StreamingPhase.Thinking;
 								this._onDidReceiveChunk.fire({
 									messageId: assistantMessage.id,
@@ -603,10 +741,9 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 									phase: StreamingPhase.Thinking,
 								});
 							} else if (blockType === 'text') {
-								currentBlockType = 'text';
-								if (!thinkingFinalized) {
-									thinkingFinalized = true;
-									assistantMessage.thinkingDurationMs = Date.now() - thinkingStartTime;
+								if (!thinkingState.finalized) {
+									thinkingState.finalized = true;
+									assistantMessage.thinkingDurationMs = Date.now() - thinkingState.startTime;
 								}
 								assistantMessage.streamingPhase = StreamingPhase.Responding;
 								this._onDidReceiveChunk.fire({
@@ -614,60 +751,79 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 									type: 'phase_change',
 									phase: StreamingPhase.Responding,
 								});
+							} else if (blockType === 'tool_use') {
+								block.toolUseId = parsed.content_block.id ?? '';
+								block.toolUseName = parsed.content_block.name ?? '';
+								if (!thinkingState.finalized) {
+									thinkingState.finalized = true;
+									assistantMessage.thinkingDurationMs = Date.now() - thinkingState.startTime;
+								}
+								assistantMessage.streamingPhase = StreamingPhase.Applying;
+								this._onDidReceiveChunk.fire({
+									messageId: assistantMessage.id,
+									type: 'phase_change',
+									phase: StreamingPhase.Applying,
+								});
 							}
+
+							contentBlocks[parsed.index] = block;
 							break;
 						}
 
 						case 'content_block_delta': {
+							const block = contentBlocks[parsed.index];
+							if (!block) {
+								break;
+							}
+
 							if (parsed.delta?.type === 'thinking_delta') {
-								const thinkingText = parsed.delta.thinking;
-								assistantMessage.thinkingContent = (assistantMessage.thinkingContent || '') + thinkingText;
+								block.thinking += parsed.delta.thinking;
+								assistantMessage.thinkingContent = (assistantMessage.thinkingContent || '') + parsed.delta.thinking;
 								this._onDidReceiveChunk.fire({
 									messageId: assistantMessage.id,
 									type: 'thinking_delta',
-									text: thinkingText,
+									text: parsed.delta.thinking,
 								});
+							} else if (parsed.delta?.type === 'signature_delta') {
+								block.signature += parsed.delta.signature;
 							} else if (parsed.delta?.type === 'text_delta') {
-								const text = parsed.delta.text;
-								assistantMessage.content += text;
+								block.text += parsed.delta.text;
+								assistantMessage.content += parsed.delta.text;
 								this._onDidReceiveChunk.fire({
 									messageId: assistantMessage.id,
 									type: 'text_delta',
-									text,
+									text: parsed.delta.text,
 								});
-								// Write any newly completed file blocks immediately (non-awaited)
 								if (this._mode === ChatMode.Agent) {
 									this._tryWriteNewCompletedBlocks(assistantMessage).catch(err => {
 										console.error('[GameDevChatService] Incremental write error:', err);
 									});
 								}
+							} else if (parsed.delta?.type === 'input_json_delta') {
+								block.toolInputJson += parsed.delta.partial_json;
 							}
 							break;
 						}
 
 						case 'content_block_stop': {
-							if (currentBlockType === 'thinking') {
-								if (!thinkingFinalized) {
-									thinkingFinalized = true;
-									assistantMessage.thinkingDurationMs = Date.now() - thinkingStartTime;
+							const block = contentBlocks[parsed.index];
+							if (block?.type === 'thinking') {
+								if (!thinkingState.finalized) {
+									thinkingState.finalized = true;
+									assistantMessage.thinkingDurationMs = Date.now() - thinkingState.startTime;
 								}
 								this._onDidReceiveChunk.fire({
 									messageId: assistantMessage.id,
 									type: 'thinking_complete',
 								});
 							}
-							currentBlockType = null;
 							break;
 						}
 
-						case 'message_delta':
-						case 'message_stop': {
-							assistantMessage.isStreaming = false;
-							assistantMessage.streamingPhase = StreamingPhase.None;
-							if (!thinkingFinalized && assistantMessage.thinkingContent) {
-								assistantMessage.thinkingDurationMs = Date.now() - thinkingStartTime;
+						case 'message_delta': {
+							if (parsed.delta?.stop_reason) {
+								stopReason = parsed.delta.stop_reason;
 							}
-							this._onDidUpdateMessages.fire();
 							break;
 						}
 					}
@@ -677,10 +833,208 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			}
 		}
 
-		// Finalize message
-		assistantMessage.isStreaming = false;
-		assistantMessage.streamingPhase = StreamingPhase.None;
+		return { contentBlocks, stopReason };
+	}
+
+	/**
+	 * Executes bridge commands from a tool_use content block.
+	 * Handles compilation retry (waits for Unity domain reload if scripts are not compiled yet).
+	 */
+	private async _executeBridgeTool(
+		block: IStreamedContentBlock,
+		assistantMessage: IChatMessage,
+	): Promise<{ text: string; isError: boolean }> {
+		let input: { commands: Array<{ category: string; action: string; params?: Record<string, unknown> }> };
+		try {
+			input = JSON.parse(block.toolInputJson || '{}');
+		} catch {
+			return { text: JSON.stringify({ success: false, error: 'Failed to parse tool input' }), isError: true };
+		}
+
+		const commands = input.commands || [];
+		if (commands.length === 0) {
+			return { text: JSON.stringify({ success: false, error: 'No commands provided' }), isError: true };
+		}
+
+		const isConnected = this.unityBridgeService.isConnected;
+		if (!isConnected) {
+			if (!assistantMessage.bridgeResults) {
+				assistantMessage.bridgeResults = [];
+			}
+			const results = commands.map(cmd => {
+				assistantMessage.bridgeResults!.push({
+					category: cmd.category,
+					action: cmd.action,
+					success: false,
+					error: 'Unity Editor not connected',
+				});
+				return { command: `${cmd.category}.${cmd.action}`, success: false, error: 'Unity Editor not connected' };
+			});
+			this._onDidUpdateMessages.fire();
+			return {
+				text: JSON.stringify({ success: false, summary: 'Unity Editor not connected', results }),
+				isError: true,
+			};
+		}
+
+		// Fire activity for bridge phase
+		this._onDidApplyActivity.fire({
+			messageId: assistantMessage.id,
+			action: `Running ${commands.length} bridge command${commands.length === 1 ? '' : 's'}`,
+			status: 'start',
+		});
+
+		// Track script names for compilation retry
+		const writtenScriptNames = new Set(
+			[...this._writtenFilePaths]
+				.filter(p => p.endsWith('.cs'))
+				.map(p => (p.split('/').pop() ?? '').replace('.cs', ''))
+		);
+
+		const isCompilationError = (error: string | undefined): boolean => {
+			if (!error || writtenScriptNames.size === 0) {
+				return false;
+			}
+			if (error.includes('Component type not found')) {
+				return true;
+			}
+			const match = error.match(/Component not found: (\w+)/);
+			if (match && writtenScriptNames.has(match[1])) {
+				return true;
+			}
+			return false;
+		};
+
+		// First pass — execute all commands
+		type RetryEntry = { cmd: typeof commands[number]; cmdLabel: string; resultIdx: number };
+		const retryQueue: RetryEntry[] = [];
+		const results: Array<{ command: string; success: boolean; error?: string; result?: unknown }> = [];
+
+		if (!assistantMessage.bridgeResults) {
+			assistantMessage.bridgeResults = [];
+		}
+
+		for (const cmd of commands) {
+			if (this._abortController?.signal.aborted) {
+				results.push({ command: `${cmd.category}.${cmd.action}`, success: false, error: 'Cancelled by user' });
+				continue;
+			}
+
+			const cmdLabel = `${cmd.category}.${cmd.action}`;
+			this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'start' });
+
+			try {
+				const response = await this.unityBridgeService.sendCommand(
+					cmd.category as BridgeCommandCategory,
+					cmd.action,
+					cmd.params,
+				);
+
+				const resultIdx = results.push({
+					command: cmdLabel,
+					success: response.success,
+					error: response.error,
+					result: response.result,
+				}) - 1;
+
+				assistantMessage.bridgeResults!.push({
+					category: cmd.category,
+					action: cmd.action,
+					success: response.success,
+					error: response.error,
+				});
+
+				if (!response.success && isCompilationError(response.error)) {
+					retryQueue.push({ cmd, cmdLabel, resultIdx });
+					this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'error', detail: response.error });
+				} else {
+					this._onDidApplyActivity.fire({
+						messageId: assistantMessage.id,
+						action: cmdLabel,
+						status: response.success ? 'done' : 'error',
+						detail: response.error,
+					});
+				}
+			} catch (error) {
+				const errorMsg = error instanceof Error ? error.message : String(error);
+				results.push({ command: cmdLabel, success: false, error: errorMsg });
+				assistantMessage.bridgeResults!.push({ category: cmd.category, action: cmd.action, success: false, error: errorMsg });
+				this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'error', detail: errorMsg });
+			}
+		}
+
+		// Second pass — if any commands need compilation, wait for Unity's domain reload and retry
+		if (retryQueue.length > 0) {
+			this._onDidApplyActivity.fire({
+				messageId: assistantMessage.id,
+				action: 'Waiting for Unity to compile new scripts',
+				status: 'start',
+			});
+			this._onDidUpdateMessages.fire();
+
+			const outcome = await this._waitForBridgeReconnect(120_000);
+
+			this._onDidApplyActivity.fire({
+				messageId: assistantMessage.id,
+				action: outcome === 'reconnected' ? 'Compilation done, retrying' : 'Compilation wait timed out',
+				status: 'done',
+			});
+
+			for (const { cmd, cmdLabel, resultIdx } of retryQueue) {
+				this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'start' });
+				try {
+					const response = await this.unityBridgeService.sendCommand(
+						cmd.category as BridgeCommandCategory,
+						cmd.action,
+						cmd.params,
+					);
+					results[resultIdx] = { command: cmdLabel, success: response.success, error: response.error };
+
+					// Update bridge results in the assistant message
+					const brIdx = assistantMessage.bridgeResults!.findIndex(
+						r => r.category === cmd.category && r.action === cmd.action && !r.success
+					);
+					if (brIdx >= 0) {
+						assistantMessage.bridgeResults![brIdx] = {
+							category: cmd.category,
+							action: cmd.action,
+							success: response.success,
+							error: response.error,
+						};
+					}
+
+					this._onDidApplyActivity.fire({
+						messageId: assistantMessage.id,
+						action: cmdLabel,
+						status: response.success ? 'done' : 'error',
+						detail: response.error,
+					});
+				} catch (error) {
+					const errorMsg = error instanceof Error ? error.message : String(error);
+					results[resultIdx] = { command: cmdLabel, success: false, error: errorMsg };
+					this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'error', detail: errorMsg });
+				}
+			}
+		}
+
 		this._onDidUpdateMessages.fire();
+
+		const allSucceeded = results.every(r => r.success);
+		const failedCount = results.filter(r => !r.success).length;
+		const summary = allSucceeded
+			? `All ${results.length} commands executed successfully.`
+			: `${failedCount} of ${results.length} commands failed.`;
+
+		this._onDidApplyActivity.fire({
+			messageId: assistantMessage.id,
+			action: `Bridge: ${summary}`,
+			status: allSucceeded ? 'done' : 'error',
+		});
+
+		return {
+			text: JSON.stringify({ success: allSucceeded, summary, results }),
+			isError: !allSucceeded,
+		};
 	}
 
 	/** Writes any newly completed file blocks found in the current streamed content. Safe to call many times — idempotent via _writtenFilePaths. */
@@ -741,190 +1095,6 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 					detail: errorMsg,
 				});
 			}
-		}
-	}
-
-	private async _applyBridgeCommands(content: string, assistantMessage: IChatMessage): Promise<void> {
-		const isConnected = this.unityBridgeService.isConnected;
-		console.log('[GameDevChatService] Scanning for bridge commands, bridge connected:', isConnected);
-
-		const results: IBridgeCommandResult[] = [];
-
-		// Parse all bridge commands from the content first
-		const allCommands: Array<{ category: string; action: string; params?: Record<string, unknown> }> = [];
-
-		// Try multiple patterns — the agent may format bridge commands differently
-		const patterns = [
-			/```unity-bridge\n([\s\S]*?)```/g,
-			/```unity-bridge\s*\n([\s\S]*?)```/g,
-			/```\s*\n(\[\s*\{\s*"category"[\s\S]*?\}\s*\])```/g,
-		];
-
-		let foundCommands = false;
-
-		for (const regex of patterns) {
-			let match: RegExpExecArray | null;
-			while ((match = regex.exec(content)) !== null) {
-				foundCommands = true;
-				const commandText = match[1].trim();
-				console.log('[GameDevChatService] Found bridge commands block:', commandText.substring(0, 100) + '...');
-				try {
-					const commands: Array<{ category: string; action: string; params?: Record<string, unknown> }> = JSON.parse(commandText);
-					allCommands.push(...commands);
-				} catch (error) {
-					console.error('[GameDevChatService] Failed to parse bridge commands:', error);
-				}
-			}
-			if (foundCommands) {
-				break;
-			}
-		}
-
-		// Last resort: look for a JSON array with "category" fields anywhere in the content
-		if (!foundCommands) {
-			const jsonArrayMatch = content.match(/\[\s*\{\s*"category"\s*:\s*"(?:gameObject|component|scene|prefab|asset|editor|project)"[\s\S]*?\}\s*\]/);
-			if (jsonArrayMatch) {
-				console.log('[GameDevChatService] Found bridge commands via JSON detection');
-				try {
-					const commands: Array<{ category: string; action: string; params?: Record<string, unknown> }> = JSON.parse(jsonArrayMatch[0]);
-					allCommands.push(...commands);
-				} catch (error) {
-					console.error('[GameDevChatService] Failed to parse auto-detected bridge commands:', error);
-				}
-			} else {
-				console.log('[GameDevChatService] No bridge commands found in response');
-			}
-		}
-
-		if (allCommands.length === 0) {
-			return;
-		}
-
-		// Fire activity for bridge phase
-		this._onDidApplyActivity.fire({
-			messageId: assistantMessage.id,
-			action: isConnected
-				? `Running ${allCommands.length} bridge command${allCommands.length === 1 ? '' : 's'}`
-				: `${allCommands.length} bridge command${allCommands.length === 1 ? '' : 's'} (Unity not connected)`,
-			status: 'start',
-		});
-
-		// If bridge is not connected, mark all commands as skipped
-		if (!isConnected) {
-			console.log(`[GameDevChatService] Bridge not connected, marking ${allCommands.length} commands as skipped`);
-			for (const cmd of allCommands) {
-				results.push({ category: cmd.category, action: cmd.action, success: false, error: 'Unity Editor not connected' });
-			}
-			this._onDidApplyActivity.fire({
-				messageId: assistantMessage.id,
-				action: `${allCommands.length} bridge command${allCommands.length === 1 ? '' : 's'} skipped`,
-				status: 'error',
-				detail: 'Unity Editor not connected',
-			});
-			assistantMessage.bridgeResults = results;
-			this._onDidUpdateMessages.fire();
-			return;
-		}
-
-		// Names of C# scripts written this session — used to detect compilation-related failures
-		const writtenScriptNames = new Set(
-			[...this._writtenFilePaths]
-				.filter(p => p.endsWith('.cs'))
-				.map(p => (p.split('/').pop() ?? '').replace('.cs', ''))
-		);
-
-		// Returns true if this bridge error is caused by a script that hasn't compiled yet
-		const isCompilationError = (error: string | undefined): boolean => {
-			if (!error || writtenScriptNames.size === 0) {
-				return false;
-			}
-			// component.add — "Component type not found: MainMenuManager"
-			if (error.includes('Component type not found')) {
-				return true;
-			}
-			// component.setProperty — "Component not found: MainMenuManager on ..."
-			const match = error.match(/Component not found: (\w+)/);
-			if (match && writtenScriptNames.has(match[1])) {
-				return true;
-			}
-			return false;
-		};
-
-		// First pass — execute all commands, track which ones need a compilation retry
-		type RetryEntry = { cmd: typeof allCommands[number]; cmdLabel: string; resultIdx: number };
-		const retryQueue: RetryEntry[] = [];
-
-		console.log(`[GameDevChatService] Executing ${allCommands.length} bridge commands`);
-		for (const cmd of allCommands) {
-			const cmdLabel = `${cmd.category}.${cmd.action}`;
-			this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'start' });
-
-			try {
-				const response = await this.unityBridgeService.sendCommand(
-					cmd.category as BridgeCommandCategory,
-					cmd.action,
-					cmd.params,
-				);
-				console.log(`[GameDevChatService] Bridge response:`, response.success ? 'OK' : response.error);
-				const resultIdx = results.push({ category: cmd.category, action: cmd.action, success: response.success, error: response.error }) - 1;
-
-				if (!response.success && isCompilationError(response.error)) {
-					// Park this command for retry after Unity compiles
-					retryQueue.push({ cmd, cmdLabel, resultIdx });
-					this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'error', detail: response.error });
-				} else {
-					this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: response.success ? 'done' : 'error', detail: response.error });
-				}
-			} catch (cmdError) {
-				const errorMsg = cmdError instanceof Error ? cmdError.message : String(cmdError);
-				results.push({ category: cmd.category, action: cmd.action, success: false, error: errorMsg });
-				this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'error', detail: errorMsg });
-			}
-		}
-
-		// Second pass — if any commands need compilation, wait for Unity's domain reload and retry
-		if (retryQueue.length > 0) {
-			this._onDidApplyActivity.fire({
-				messageId: assistantMessage.id,
-				action: 'Waiting for Unity to compile new scripts',
-				status: 'start',
-			});
-
-			// Flush current results so the UI shows the pending state
-			assistantMessage.bridgeResults = [...results];
-			this._onDidUpdateMessages.fire();
-
-			const outcome = await this._waitForBridgeReconnect(120_000);
-			console.log(`[GameDevChatService] Bridge reconnect outcome: ${outcome}, retrying ${retryQueue.length} commands`);
-
-			this._onDidApplyActivity.fire({
-				messageId: assistantMessage.id,
-				action: 'Compilation done, applying remaining commands',
-				status: 'done',
-			});
-
-			for (const { cmd, cmdLabel, resultIdx } of retryQueue) {
-				this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'start' });
-				try {
-					const response = await this.unityBridgeService.sendCommand(
-						cmd.category as BridgeCommandCategory,
-						cmd.action,
-						cmd.params,
-					);
-					console.log(`[GameDevChatService] Retry response:`, response.success ? 'OK' : response.error);
-					results[resultIdx] = { category: cmd.category, action: cmd.action, success: response.success, error: response.error };
-					this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: response.success ? 'done' : 'error', detail: response.error });
-				} catch (retryError) {
-					const errorMsg = retryError instanceof Error ? retryError.message : String(retryError);
-					results[resultIdx] = { category: cmd.category, action: cmd.action, success: false, error: errorMsg };
-					this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'error', detail: errorMsg });
-				}
-			}
-		}
-
-		if (results.length > 0) {
-			assistantMessage.bridgeResults = results;
-			this._onDidUpdateMessages.fire();
 		}
 	}
 

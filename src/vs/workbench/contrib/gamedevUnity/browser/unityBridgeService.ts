@@ -23,8 +23,8 @@ import {
 	BRIDGE_DISCOVERY_PATH,
 	BRIDGE_DISCOVERY_POLL_MS,
 	BRIDGE_MAX_RECONNECT_ATTEMPTS,
-	BRIDGE_PROTOCOL_VERSION,
 	BRIDGE_RECONNECT_DELAY_MS,
+	BRIDGE_SUPPORTED_VERSIONS,
 	IUnityBridgeService,
 	UnityBridgeConnectionState,
 	UnityConsoleLog,
@@ -52,6 +52,7 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 	private _discoveryPollHandle: ReturnType<typeof setInterval> | undefined;
 	private _reconnectAttempts = 0;
 	private _discoveredPort: number | undefined;
+	private _discoveredChannel: string | undefined;
 	private readonly _pendingRequests = new Map<string, { deferred: DeferredPromise<BridgeResponse>; timeout: ReturnType<typeof setTimeout> }>();
 
 	/** Tracks last discovery poll result to avoid repetitive logging */
@@ -73,18 +74,14 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 	) {
 		super();
 
-		console.log('[UnityBridgeService] Service created');
-
 		// Auto-deploy plugin and start discovery when a Unity project is detected
 		this._register(this.unityProjectService.onDidDetectProject(() => {
-			console.log('[UnityBridgeService] Project detected via event');
 			this.startDiscovery();
 			this._ensurePluginInstalledSafe();
 		}));
 
 		// If project already detected at construction time
 		if (this.unityProjectService.currentProject?.isUnityProject) {
-			console.log('[UnityBridgeService] Project already detected at construction');
 			this.startDiscovery();
 			this._ensurePluginInstalledSafe();
 		}
@@ -93,7 +90,7 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 	private _ensurePluginInstalledSafe(): void {
 		// Fire and forget — never block discovery/connection
 		this._ensurePluginInstalled().then(
-			() => console.log('[UnityBridgeService] Plugin install check complete'),
+			undefined,
 			(err) => console.warn('[UnityBridgeService] Plugin install failed:', err instanceof Error ? err.message : String(err)),
 		);
 	}
@@ -109,10 +106,8 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 	// --- Plugin Auto-Deploy ---
 
 	private async _ensurePluginInstalled(): Promise<void> {
-		console.log('[UnityBridgeService] Checking plugin installation...');
 		const folders = this.workspaceContextService.getWorkspace().folders;
 		if (folders.length === 0) {
-			console.log('[UnityBridgeService] No workspace folders, skipping plugin install');
 			return;
 		}
 
@@ -127,21 +122,17 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 			// Check version — only update if our version is newer
 			const versionMatch = existingContent.match(/Plugin version:\s*([^\s*]+)/);
 			if (versionMatch && versionMatch[1] === BRIDGE_PLUGIN_VERSION) {
-				// Already up to date
-				return;
+				return; // Already up to date
 			}
 
 			// Version mismatch or missing — update the plugin
-			console.log(`[UnityBridgeService] Updating bridge plugin from ${versionMatch?.[1] ?? 'unknown'} to ${BRIDGE_PLUGIN_VERSION}`);
 			await this.fileService.writeFile(pluginUri, VSBuffer.fromString(getBridgePluginSource()));
 		} catch {
 			// File doesn't exist — install it
 			try {
-				// Ensure Assets/Editor/ directory exists by creating the file
-				console.log(`[UnityBridgeService] Installing bridge plugin v${BRIDGE_PLUGIN_VERSION} to ${BRIDGE_PLUGIN_INSTALL_PATH}`);
 				await this.fileService.createFile(pluginUri, VSBuffer.fromString(getBridgePluginSource()));
-			} catch (createError) {
-				console.error('[UnityBridgeService] Failed to install bridge plugin:', createError instanceof Error ? createError.message : String(createError));
+			} catch {
+				// Failed to install — will retry next time
 			}
 		}
 	}
@@ -150,19 +141,14 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 
 	private startDiscovery(): void {
 		if (this._discoveryPollHandle) {
-			console.log(`[UnityBridgeService] Discovery already polling (state=${this._connectionState})`);
 			return; // Already polling
 		}
 
-		console.log('[UnityBridgeService] Starting discovery polling');
 		// Poll immediately, then on interval
 		this.pollForDiscoveryFile();
 		this._discoveryPollHandle = setInterval(() => {
-			console.log(`[UnityBridgeService] Discovery tick — state=${this._connectionState}`);
 			if (this._connectionState === UnityBridgeConnectionState.Disconnected) {
 				this.pollForDiscoveryFile();
-			} else {
-				console.log(`[UnityBridgeService] Discovery tick skipped (not Disconnected)`);
 			}
 		}, BRIDGE_DISCOVERY_POLL_MS);
 	}
@@ -177,35 +163,29 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 	private async pollForDiscoveryFile(): Promise<void> {
 		const folders = this.workspaceContextService.getWorkspace().folders;
 		if (folders.length === 0) {
-			console.log('[UnityBridgeService] pollForDiscoveryFile: no workspace folders, skipping');
 			return;
 		}
 
 		const projectRoot = folders[0].uri;
 		const discoveryUri = URI.joinPath(projectRoot, BRIDGE_DISCOVERY_PATH);
 
-		console.log(`[UnityBridgeService] Polling ${BRIDGE_DISCOVERY_PATH}...`);
-
 		try {
 			const content = await this.fileService.readFile(discoveryUri);
 			const text = content.value.toString();
-			console.log(`[UnityBridgeService] Discovery file content: ${text}`);
 			const info: BridgeDiscoveryInfo = JSON.parse(text);
 
 			// Validate
 			if (!info.port || !info.version) {
-				console.warn('[UnityBridgeService] Discovery file missing port or version:', info);
 				this._logDiscoveryTransition(DiscoveryState.NotFound, 'Discovery file missing port or version');
 				return;
 			}
 
 			// Check version compatibility
-			if (info.version !== BRIDGE_PROTOCOL_VERSION) {
-				console.warn(`[UnityBridgeService] Protocol version mismatch: expected ${BRIDGE_PROTOCOL_VERSION}, got ${info.version}`);
+			if (!BRIDGE_SUPPORTED_VERSIONS.has(info.version)) {
+				console.warn(`[UnityBridgeService] Unsupported protocol version: ${info.version} (supported: ${[...BRIDGE_SUPPORTED_VERSIONS].join(', ')})`);
 			}
 
 			const age = Date.now() / 1000 - info.timestamp;
-			console.log(`[UnityBridgeService] Discovery file: port=${info.port}, age=${Math.round(age)}s, state=${this._connectionState}`);
 
 			// Ignore stale discovery files (older than 60s — Unity is likely not running)
 			if (age > 60) {
@@ -222,11 +202,10 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 			// Fresh discovery — log transition and connect
 			this._logDiscoveryTransition(DiscoveryState.Fresh, `Found Unity on port ${info.port} (${Math.round(age)}s old)`);
 			this._discoveredPort = info.port;
-			console.log(`[UnityBridgeService] Calling connect() for port ${info.port}, current state=${this._connectionState}`);
+			this._discoveredChannel = info.channel;
 			await this.connect();
-		} catch (err) {
+		} catch {
 			// File not found or invalid — expected when Unity isn't running
-			console.log(`[UnityBridgeService] Discovery file not found or unreadable: ${err instanceof Error ? err.message : String(err)}`);
 			this._logDiscoveryTransition(DiscoveryState.NotFound);
 		}
 	}
@@ -249,26 +228,24 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 
 	async connect(): Promise<void> {
 		if (!this._discoveredPort) {
-			console.log('[UnityBridgeService] connect() called but no discovered port, skipping');
 			return;
 		}
 
 		if (this._connectionState === UnityBridgeConnectionState.Connected ||
 			this._connectionState === UnityBridgeConnectionState.Connecting) {
-			console.log(`[UnityBridgeService] connect() called but already ${this._connectionState}, skipping`);
 			return;
 		}
 
-		console.log(`[UnityBridgeService] Connecting to ws://127.0.0.1:${this._discoveredPort} (state was ${this._connectionState})`);
 		this.setConnectionState(UnityBridgeConnectionState.Connecting);
 
 		try {
-			const ws = new WebSocket(`ws://127.0.0.1:${this._discoveredPort}`);
+			// Build URL: use channel path for v2.0 (MPE ChannelService), bare port for v1.0
+			const wsUrl = this._discoveredChannel
+				? `ws://127.0.0.1:${this._discoveredPort}/${this._discoveredChannel}`
+				: `ws://127.0.0.1:${this._discoveredPort}`;
+			const ws = new WebSocket(wsUrl);
 
 			await new Promise<void>((resolve, reject) => {
-				// If neither 'open' nor 'error' fires (TCP established but HTTP upgrade
-				// stalled because Unity wrote the discovery file before AcceptConnections
-				// was ready), time out so we don't get stuck in 'connecting' forever.
 				const timeoutHandle = setTimeout(() => {
 					ws.removeEventListener('open', onOpen);
 					ws.removeEventListener('error', onError);
@@ -296,7 +273,7 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 			this._reconnectAttempts = 0;
 			this.setConnectionState(UnityBridgeConnectionState.Connected);
 
-			console.log('[UnityBridgeService] Connected to Unity Editor');
+			console.log(`[UnityBridgeService] Connected to Unity Editor (${wsUrl})`);
 
 			// Set up message handling
 			ws.addEventListener('message', (event) => {
@@ -304,14 +281,13 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 			});
 
 			ws.addEventListener('close', (e) => {
-				console.log(`[UnityBridgeService] WebSocket closed (code=${e.code}, reason="${e.reason}")`);
+				console.log(`[UnityBridgeService] WebSocket closed (code=${e.code})`);
 				this._webSocket = undefined;
 				this.rejectAllPending('Connection closed');
 				this.attemptReconnect();
 			});
 
-			ws.addEventListener('error', (e) => {
-				console.warn(`[UnityBridgeService] WebSocket error event: ${e}`);
+			ws.addEventListener('error', () => {
 				// Error is followed by close event, which handles reconnection
 			});
 
@@ -320,9 +296,7 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 			this.setConnectionState(UnityBridgeConnectionState.Disconnected);
 			// Unity may be mid-domain-reload (recompiling). Poll again in 2s (faster than
 			// the normal 5s discovery interval) so we pick up the new bridge quickly.
-			console.log('[UnityBridgeService] Scheduling quick re-poll in 2s...');
 			setTimeout(() => {
-				console.log(`[UnityBridgeService] Quick re-poll firing (state=${this._connectionState})`);
 				if (this._connectionState === UnityBridgeConnectionState.Disconnected) {
 					this.pollForDiscoveryFile();
 				}
