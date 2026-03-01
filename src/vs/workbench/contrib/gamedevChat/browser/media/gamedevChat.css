@@ -446,12 +446,71 @@
 }
 
 /* ===== Attachment chips ===== */
+.gamedev-attachment-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	background: var(--vscode-badge-background);
+	color: var(--vscode-badge-foreground);
+	padding: 2px 6px;
+	border-radius: 4px;
+	font-size: 11px;
+	max-width: 180px;
+}
+
 .gamedev-attachment-chip:hover {
 	filter: brightness(1.15);
 }
 
+.gamedev-attachment-chip.image-chip {
+	padding: 2px 6px 2px 2px;
+}
+
+.gamedev-attachment-chip img.attachment-thumbnail {
+	height: 32px;
+	width: 32px;
+	border-radius: 3px;
+	object-fit: cover;
+}
+
+.gamedev-attachment-chip .gamedev-attachment-remove {
+	cursor: pointer;
+	font-size: 14px;
+	line-height: 1;
+	opacity: 0.7;
+	flex-shrink: 0;
+}
+
 .gamedev-attachment-chip .gamedev-attachment-remove:hover {
 	opacity: 1 !important;
+}
+
+/* ===== Image previews in chat messages ===== */
+.gamedev-message-images {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 6px;
+}
+
+.gamedev-message-images img {
+	max-height: 120px;
+	max-width: 200px;
+	border-radius: 6px;
+	object-fit: cover;
+	cursor: pointer;
+	border: 1px solid var(--vscode-panel-border);
+}
+
+.gamedev-message-images img:hover {
+	border-color: var(--vscode-focusBorder);
+}
+
+/* ===== Attach button ===== */
+.gamedev-attach-btn:hover {
+	background: var(--vscode-button-secondaryBackground) !important;
+	border-color: var(--vscode-focusBorder) !important;
+	color: var(--vscode-foreground) !important;
 }
 
 /* ===== Header icon buttons ===== */

@@ -294,6 +294,32 @@ export class GameDevChatViewPane extends ViewPane {
 			this.checkMentionTrigger();
 		}));
 
+		// Clipboard paste handler for images
+		this._register(addDisposableListener(this.inputElement, 'paste', (e: ClipboardEvent) => {
+			const items = e.clipboardData?.items;
+			if (!items) {
+				return;
+			}
+			for (const item of Array.from(items)) {
+				if (item.type.startsWith('image/')) {
+					e.preventDefault();
+					const blob = item.getAsFile();
+					if (!blob) {
+						continue;
+					}
+					const reader = new FileReader();
+					reader.onload = () => {
+						const dataUrl = reader.result as string;
+						const base64 = dataUrl.split(',')[1];
+						if (base64) {
+							this.addImageAttachment(blob.name || 'pasted-image.png', item.type, base64);
+						}
+					};
+					reader.readAsDataURL(blob);
+				}
+			}
+		}));
+
 		// Handle Enter key + keyboard navigation for @ popup
 		this._register(addDisposableListener(this.inputElement, EventType.KEY_DOWN, (e: KeyboardEvent) => {
 			const event = new StandardKeyboardEvent(e);
@@ -347,6 +373,30 @@ export class GameDevChatViewPane extends ViewPane {
 				this.inputWrapper.style.borderColor = 'var(--vscode-input-border)';
 				this.inputWrapper.style.borderStyle = 'solid';
 
+				// Check for dropped image files first
+				const files = e.dataTransfer?.files;
+				if (files && files.length > 0) {
+					let handledImage = false;
+					for (const file of Array.from(files)) {
+						if (file.type.startsWith('image/')) {
+							handledImage = true;
+							const reader = new FileReader();
+							reader.onload = () => {
+								const dataUrl = reader.result as string;
+								const base64 = dataUrl.split(',')[1];
+								if (base64) {
+									this.addImageAttachment(file.name || 'dropped-image.png', file.type, base64);
+								}
+							};
+							reader.readAsDataURL(file);
+						}
+					}
+					if (handledImage) {
+						return;
+					}
+				}
+
+				// Non-image files: use existing editor drop data flow
 				const editors = await extractEditorsDropData(e);
 				for (const editor of editors) {
 					if (editor.resource) {
@@ -425,6 +475,50 @@ export class GameDevChatViewPane extends ViewPane {
 		this.modelButton.addEventListener('click', (e) => {
 			e.stopPropagation();
 			this.toggleModelPopup();
+		});
+
+		// Attach image button
+		const attachBtn = append(leftTools, $('button.gamedev-attach-btn')) as HTMLButtonElement;
+		attachBtn.style.cssText = `
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			background: transparent;
+			border: 1px solid var(--vscode-panel-border);
+			color: var(--vscode-descriptionForeground);
+			width: 26px;
+			height: 26px;
+			border-radius: 4px;
+			cursor: pointer;
+			transition: all 0.15s;
+		`;
+		attachBtn.title = 'Attach image';
+		append(attachBtn, $('span.codicon.codicon-file-media'));
+
+		// Hidden file input for image picker
+		const fileInput = document.createElement('input');
+		fileInput.type = 'file';
+		fileInput.accept = 'image/png,image/jpeg,image/gif,image/webp';
+		fileInput.multiple = true;
+		fileInput.style.display = 'none';
+		this.inputContainer.appendChild(fileInput);
+
+		attachBtn.addEventListener('click', () => fileInput.click());
+		fileInput.addEventListener('change', () => {
+			if (fileInput.files) {
+				for (const file of Array.from(fileInput.files)) {
+					const reader = new FileReader();
+					reader.onload = () => {
+						const dataUrl = reader.result as string;
+						const base64 = dataUrl.split(',')[1];
+						if (base64) {
+							this.addImageAttachment(file.name, file.type, base64);
+						}
+					};
+					reader.readAsDataURL(file);
+				}
+			}
+			fileInput.value = ''; // Reset so same file can be re-selected
 		});
 
 		// Right tools container (stop button lives here)
@@ -1442,15 +1536,16 @@ export class GameDevChatViewPane extends ViewPane {
 		messageEl.style.cssText = 'display: flex; flex-direction: column; gap: 8px;';
 
 		if (isUser) {
-			// Show attachment badges above user message
-			if (message.attachments && message.attachments.length > 0) {
+			// Show attachment badges above user message (text file attachments)
+			const textAttachments = message.attachments?.filter(a => !a.mimeType?.startsWith('image/'));
+			if (textAttachments && textAttachments.length > 0) {
 				const attachBadges = append(messageEl, $('.gamedev-msg-attachments'));
 				attachBadges.style.cssText = `
 					display: flex;
 					flex-wrap: wrap;
 					gap: 4px;
 				`;
-				for (const att of message.attachments) {
+				for (const att of textAttachments) {
 					const badge = append(attachBadges, $('span.gamedev-msg-attachment-badge'));
 					badge.style.cssText = `
 						display: inline-flex;
@@ -1475,6 +1570,18 @@ export class GameDevChatViewPane extends ViewPane {
 				color: var(--vscode-foreground);
 			`;
 			userBox.textContent = message.content;
+
+			// Show image thumbnails below the user message text
+			const imageAttachments = message.attachments?.filter(a => a.mimeType?.startsWith('image/') && a.base64Data);
+			if (imageAttachments && imageAttachments.length > 0) {
+				const imagesRow = append(messageEl, $('.gamedev-message-images'));
+				for (const img of imageAttachments) {
+					const imgEl = append(imagesRow, $('img')) as HTMLImageElement;
+					imgEl.src = `data:${img.mimeType};base64,${img.base64Data}`;
+					imgEl.alt = img.name;
+					imgEl.title = img.name;
+				}
+			}
 		} else {
 			const assistantContainer = append(messageEl, $('.assistant-message'));
 			assistantContainer.style.cssText = 'display: flex; flex-direction: column; gap: 4px;';
@@ -1794,12 +1901,35 @@ export class GameDevChatViewPane extends ViewPane {
 
 	// --- Attachment management ---
 
+	private static readonly MAX_IMAGE_ATTACHMENTS = 5;
+	private static readonly MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024; // 20MB Anthropic limit
+
 	private addAttachment(uri: URI): void {
 		// Avoid duplicates
 		if (this.attachments.some(a => a.uri.toString() === uri.toString())) {
 			return;
 		}
 		this.attachments.push({ uri, name: basename(uri) });
+		this.renderAttachmentChips();
+	}
+
+	private addImageAttachment(name: string, mimeType: string, base64Data: string): void {
+		// Enforce size limit (~20MB accounting for base64 overhead)
+		if (base64Data.length > GameDevChatViewPane.MAX_IMAGE_SIZE_BYTES * 1.37) {
+			return;
+		}
+		// Enforce max image count
+		const currentImageCount = this.attachments.filter(a => !!a.base64Data).length;
+		if (currentImageCount >= GameDevChatViewPane.MAX_IMAGE_ATTACHMENTS) {
+			return;
+		}
+
+		this.attachments.push({
+			uri: URI.parse(`image://${encodeURIComponent(name)}`),
+			name,
+			mimeType,
+			base64Data,
+		});
 		this.renderAttachmentChips();
 	}
 
@@ -1825,33 +1955,24 @@ export class GameDevChatViewPane extends ViewPane {
 
 		this.attachmentsContainer.style.display = 'flex';
 		for (const attachment of this.attachments) {
-			const chip = append(this.attachmentsContainer, $('.gamedev-attachment-chip'));
-			chip.style.cssText = `
-				display: inline-flex;
-				align-items: center;
-				gap: 4px;
-				background: var(--vscode-badge-background);
-				color: var(--vscode-badge-foreground);
-				padding: 2px 6px;
-				border-radius: 4px;
-				font-size: 11px;
-				max-width: 180px;
-			`;
+			const isImage = !!attachment.base64Data && !!attachment.mimeType;
+			const chip = append(this.attachmentsContainer, $(`.gamedev-attachment-chip${isImage ? '.image-chip' : ''}`));
 
-			const nameSpan = append(chip, $('span'));
-			nameSpan.textContent = attachment.name;
-			nameSpan.style.cssText = 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
+			if (isImage) {
+				// Image chip: show thumbnail
+				const thumb = append(chip, $('img.attachment-thumbnail'));
+				thumb.setAttribute('src', `data:${attachment.mimeType};base64,${attachment.base64Data}`);
+				thumb.setAttribute('alt', attachment.name);
+			} else {
+				// Text file chip: show name
+				const nameSpan = append(chip, $('span'));
+				nameSpan.textContent = attachment.name;
+				nameSpan.style.cssText = 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
+			}
 
 			const removeBtn = append(chip, $('span.gamedev-attachment-remove'));
 			// allow-any-unicode-next-line
 			removeBtn.textContent = '\u00D7';
-			removeBtn.style.cssText = `
-				cursor: pointer;
-				font-size: 14px;
-				line-height: 1;
-				opacity: 0.7;
-				flex-shrink: 0;
-			`;
 			removeBtn.addEventListener('click', () => this.removeAttachment(attachment.uri));
 		}
 	}

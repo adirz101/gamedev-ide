@@ -51,6 +51,14 @@ export interface IApplyActivityEvent {
 export interface IFileAttachment {
 	readonly uri: URI;
 	readonly name: string;
+	readonly mimeType?: string;       // e.g. 'image/png', 'image/jpeg'
+	readonly base64Data?: string;      // base64-encoded image content
+}
+
+const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+function isImageAttachment(a: IFileAttachment): boolean {
+	return !!a.mimeType && SUPPORTED_IMAGE_TYPES.has(a.mimeType);
 }
 
 export interface ISendMessageOptions {
@@ -315,13 +323,17 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 	private _saveMessages(): void {
 		// Don't save streaming messages; strip large content fields to avoid storage bloat
 		const toSave = this._messages.filter(m => !m.isStreaming).map(m => {
-			if (!m.appliedFiles) {
-				return m;
+			const cleaned = { ...m };
+			if (cleaned.appliedFiles) {
+				cleaned.appliedFiles = cleaned.appliedFiles.map(f => ({ filePath: f.filePath, status: f.status, error: f.error }));
 			}
-			return {
-				...m,
-				appliedFiles: m.appliedFiles.map(f => ({ filePath: f.filePath, status: f.status, error: f.error })),
-			};
+			// Strip base64Data from image attachments to avoid localStorage bloat
+			if (cleaned.attachments) {
+				cleaned.attachments = cleaned.attachments.map(a =>
+					a.base64Data ? { uri: a.uri, name: a.name, mimeType: a.mimeType } as IFileAttachment : a
+				);
+			}
+			return cleaned;
 		});
 		this.storageService.store(STORAGE_KEY_MESSAGES, JSON.stringify(toSave), StorageScope.PROFILE, StorageTarget.USER);
 	}
@@ -395,11 +407,15 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		const shouldIncludeContext = options?.includeProjectContext ?? this._includeProjectContext;
 		const attachments = options?.attachments;
 
-		// Build augmented content with file attachments for the API
+		// Separate image attachments from text file attachments
+		const imageAttachments = attachments?.filter(a => isImageAttachment(a) && a.base64Data) ?? [];
+		const textAttachments = attachments?.filter(a => !isImageAttachment(a)) ?? [];
+
+		// Build augmented content with text file attachments for the API
 		let augmentedContent: string | undefined;
-		if (attachments && attachments.length > 0) {
+		if (textAttachments.length > 0) {
 			const fileBlocks: string[] = [];
-			for (const attachment of attachments) {
+			for (const attachment of textAttachments) {
 				try {
 					const fileContent = await this.fileService.readFile(attachment.uri, { limits: { size: 100 * 1024 } });
 					fileBlocks.push(`--- ${attachment.uri.path} ---\n${fileContent.value.toString()}\n--- end ---`);
@@ -441,7 +457,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 		this._onDidUpdateMessages.fire();
 
 		try {
-			await this._streamResponse(assistantMessage, shouldIncludeContext, augmentedContent);
+			await this._streamResponse(assistantMessage, shouldIncludeContext, augmentedContent, imageAttachments);
 		} catch (error) {
 			if (error instanceof DOMException && error.name === 'AbortError') {
 				// User stopped streaming — keep partial content
@@ -483,7 +499,7 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 	 * (executes bridge commands), sends tool_result back, and repeats until the
 	 * model produces a final end_turn response.
 	 */
-	private async _streamResponse(assistantMessage: IChatMessage, includeContext: boolean, augmentedContent?: string): Promise<void> {
+	private async _streamResponse(assistantMessage: IChatMessage, includeContext: boolean, augmentedContent?: string, imageAttachments?: IFileAttachment[]): Promise<void> {
 		// Build messages array for API
 		const apiMessages: Array<{ role: string; content: unknown }> = this._messages
 			.filter(m => !m.isStreaming)
@@ -493,10 +509,31 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			}));
 
 		// Replace the last user message content with augmented content (includes file attachments)
-		if (augmentedContent && apiMessages.length > 0) {
+		// and/or image attachments (base64 content blocks)
+		if (apiMessages.length > 0) {
 			const lastMsg = apiMessages[apiMessages.length - 1];
 			if (lastMsg.role === 'user') {
-				lastMsg.content = augmentedContent;
+				const hasImages = imageAttachments && imageAttachments.length > 0;
+				if (hasImages) {
+					// Build multi-content array: text + image blocks
+					const contentArray: unknown[] = [];
+					contentArray.push({ type: 'text', text: augmentedContent ?? lastMsg.content as string });
+					for (const img of imageAttachments) {
+						if (img.base64Data && img.mimeType) {
+							contentArray.push({
+								type: 'image',
+								source: {
+									type: 'base64',
+									media_type: img.mimeType,
+									data: img.base64Data,
+								},
+							});
+						}
+					}
+					lastMsg.content = contentArray;
+				} else if (augmentedContent) {
+					lastMsg.content = augmentedContent;
+				}
 			}
 		}
 
