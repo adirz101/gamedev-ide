@@ -57,6 +57,17 @@ When a script has serialized fields (public or [SerializeField]) that reference 
 
 **Always wire up ALL serialized reference fields** — unassigned references cause runtime errors (UnassignedReferenceException). After creating objects and adding scripts, review each script's serialized fields and set every reference.
 
+**UnityEvents (onClick, onValueChanged, etc.) CANNOT be wired via setProperty.**
+For buttons and UI events, the script must wire its own listeners in code. Example pattern:
+\`\`\`csharp
+[SerializeField] private Button quitButton;
+void Start() {
+    quitButton.onClick.AddListener(OnQuitClicked);
+}
+void OnQuitClicked() { Application.Quit(); }
+\`\`\`
+Then use setProperty to assign the Button reference: \`{ propertyName: "quitButton", value: "Canvas/QuitButton" }\`
+
 **Common enum values for setProperty:**
 - TextMeshPro alignment: TopLeft, Top, TopRight, Left, Center, Right, BottomLeft, Bottom, BottomRight, MidlineLeft, Midline, MidlineRight (NOT MiddleLeft/MiddleRight/MiddleCenter)
 - Canvas renderMode: ScreenSpaceOverlay, ScreenSpaceCamera, WorldSpace

@@ -893,19 +893,75 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			};
 		}
 
+		// If C# scripts were written during this conversation, trigger Unity compilation
+		// BEFORE executing bridge commands. This avoids needing window focus and prevents
+		// the connection from dropping mid-execution due to a late domain reload.
+		const writtenScriptNames = new Set(
+			[...this._writtenFilePaths]
+				.filter(p => p.endsWith('.cs'))
+				.map(p => (p.split('/').pop() ?? '').replace('.cs', ''))
+		);
+
+		if (writtenScriptNames.size > 0) {
+			// Show compilation phase immediately
+			assistantMessage.streamingPhase = StreamingPhase.WaitingForCompilation;
+			this._onDidReceiveChunk.fire({
+				messageId: assistantMessage.id,
+				type: 'phase_change',
+				phase: StreamingPhase.WaitingForCompilation,
+			});
+			this._onDidApplyActivity.fire({
+				messageId: assistantMessage.id,
+				action: 'Triggering Unity compilation',
+				status: 'start',
+			});
+
+			try {
+				await this.unityBridgeService.sendCommand(
+					'project' as BridgeCommandCategory,
+					'refresh',
+				);
+			} catch {
+				// Refresh may fail if Unity is already recompiling — that's fine
+			}
+
+			// AssetDatabase.Refresh() is async — Unity queues compilation and does
+			// a domain reload on the next editor update. We must wait for the full
+			// disconnect → reconnect cycle before executing bridge commands.
+			// Step 1: Wait for the connection to DROP (domain reload starts).
+			//         Unity may take a few seconds to start compiling.
+			const disconnectDeadline = Date.now() + 15_000;
+			while (this.unityBridgeService.isConnected && Date.now() < disconnectDeadline) {
+				await new Promise(resolve => setTimeout(resolve, 300));
+			}
+
+			// Step 2: Wait for reconnection (domain reload finished, bridge restarts).
+			if (!this.unityBridgeService.isConnected) {
+				await this._waitForBridgeReconnect(120_000);
+			}
+
+			// Step 3: Brief settle time — Unity may need a moment after reconnect
+			await new Promise(resolve => setTimeout(resolve, 1000));
+
+			assistantMessage.streamingPhase = StreamingPhase.Applying;
+			this._onDidReceiveChunk.fire({
+				messageId: assistantMessage.id,
+				type: 'phase_change',
+				phase: StreamingPhase.Applying,
+			});
+			this._onDidApplyActivity.fire({
+				messageId: assistantMessage.id,
+				action: 'Unity compilation complete',
+				status: 'done',
+			});
+		}
+
 		// Fire activity for bridge phase
 		this._onDidApplyActivity.fire({
 			messageId: assistantMessage.id,
 			action: `Running ${commands.length} bridge command${commands.length === 1 ? '' : 's'}`,
 			status: 'start',
 		});
-
-		// Track script names for compilation retry
-		const writtenScriptNames = new Set(
-			[...this._writtenFilePaths]
-				.filter(p => p.endsWith('.cs'))
-				.map(p => (p.split('/').pop() ?? '').replace('.cs', ''))
-		);
 
 		const isRetryableError = (error: string | undefined): boolean => {
 			if (!error) {
