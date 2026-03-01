@@ -52,7 +52,6 @@ export class GameDevChatViewPane extends ViewPane {
 	private modelButton: HTMLButtonElement | undefined;
 	private modelButtonText: HTMLElement | undefined;
 	private modelPopup: HTMLElement | undefined;
-	private rightToolsContainer: HTMLElement | undefined;
 
 	// Bridge connection indicator
 	private bridgeStatusDot: HTMLElement | undefined;
@@ -521,10 +520,6 @@ export class GameDevChatViewPane extends ViewPane {
 			fileInput.value = ''; // Reset so same file can be re-selected
 		});
 
-		// Right tools container (stop button lives here)
-		this.rightToolsContainer = append(toolbar, $('.right-tools'));
-		this.rightToolsContainer.style.cssText = 'display: flex; gap: 8px; align-items: center;';
-
 		// Project context toggle button
 		const contextBtn = append(leftTools, $('button')) as HTMLButtonElement;
 		this.contextBadge = contextBtn;
@@ -785,26 +780,10 @@ export class GameDevChatViewPane extends ViewPane {
 
 	private updateStopButton(): void {
 		if (this.chatService.isStreaming) {
-			if (!this.stopButton && this.rightToolsContainer) {
-				this.stopButton = append(this.rightToolsContainer, $('button.gamedev-stop-btn'));
-				this.stopButton.style.cssText = `
-					display: flex;
-					align-items: center;
-					gap: 4px;
-					background: var(--vscode-button-secondaryBackground);
-					border: none;
-					color: var(--vscode-errorForeground);
-					padding: 4px 10px;
-					border-radius: 4px;
-					font-size: 12px;
-					cursor: pointer;
-				`;
-				// allow-any-unicode-next-line
-				const stopIcon = append(this.stopButton, $('span'));
-				stopIcon.textContent = '\u25A0';
-				stopIcon.style.fontSize = '10px';
-				const stopText = append(this.stopButton, $('span'));
-				stopText.textContent = 'Stop';
+			if (!this.stopButton && this.inputWrapper) {
+				this.stopButton = append(this.inputWrapper, $('button.gamedev-stop-btn'));
+				append(this.stopButton, $('span.codicon.codicon-debug-stop'));
+				this.stopButton.title = 'Stop generating';
 				this.stopButton.addEventListener('click', () => this.chatService.stopStreaming());
 			}
 		} else {

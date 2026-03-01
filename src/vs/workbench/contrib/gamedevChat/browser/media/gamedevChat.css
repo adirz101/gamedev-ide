@@ -544,9 +544,34 @@
 	background: rgba(255, 255, 255, 0.06) !important;
 }
 
-/* ===== Stop button ===== */
+/* ===== Stop button (top-right of input wrapper) ===== */
+.gamedev-stop-btn {
+	position: absolute;
+	top: 6px;
+	right: 6px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-panel-border);
+	background: var(--vscode-button-secondaryBackground);
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	transition: all 0.15s;
+	z-index: 1;
+}
+
+.gamedev-stop-btn .codicon {
+	font-size: 14px;
+}
+
 .gamedev-stop-btn:hover {
-	filter: brightness(1.15);
+	background: var(--vscode-button-secondaryHoverBackground, rgba(255, 255, 255, 0.1));
+	color: var(--vscode-errorForeground);
+	border-color: var(--vscode-errorForeground);
 }
 
 /* ===== Mode toggle button ===== */

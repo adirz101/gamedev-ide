@@ -6,7 +6,7 @@
  *  the running Unity Editor to create GameObjects, scenes, prefabs, etc.
  *
  *  Protocol version: 1.0
- *  Plugin version: 1.3.1
+ *  Plugin version: 1.3.2
  *--------------------------------------------------------------------------------------------*/
 
 using UnityEngine;
@@ -44,6 +44,7 @@ public static class GameDevIDEBridge
     private static int _port;
     private static bool _running;
     private static bool _clientConnected;
+    private static double _lastDiscoveryRefresh;
 
     static GameDevIDEBridge()
     {
@@ -447,6 +448,13 @@ public static class GameDevIDEBridge
 
     private static void ProcessMessages()
     {
+        // Refresh discovery file every 30 seconds so the IDE knows we're alive
+        if (_running && EditorApplication.timeSinceStartup - _lastDiscoveryRefresh > 30.0)
+        {
+            _lastDiscoveryRefresh = EditorApplication.timeSinceStartup;
+            WriteDiscoveryFile();
+        }
+
         // Process up to 10 messages per frame to avoid blocking
         int processed = 0;
         while (_incomingMessages.TryDequeue(out var message) && processed < 10)

@@ -187,14 +187,23 @@ export class UnityBridgeService extends Disposable implements IUnityBridgeServic
 
 			const age = Date.now() / 1000 - info.timestamp;
 
-			// Ignore stale discovery files (older than 60s — Unity is likely not running)
+			// Discovery file is stale (> 60s) but Unity may still be running —
+			// attempt to connect anyway. The WebSocket handshake will fail quickly
+			// if Unity isn't there.
 			if (age > 60) {
-				this._logDiscoveryTransition(DiscoveryState.Stale, `Discovery file stale (${Math.round(age)}s old), deleting`);
-				// Delete stale file so we don't re-read it every poll cycle
-				try {
-					await this.fileService.del(discoveryUri);
-				} catch {
-					// Ignore delete errors — file may already be gone
+				this._logDiscoveryTransition(DiscoveryState.Stale, `Discovery file stale (${Math.round(age)}s old), attempting connection anyway`);
+				this._discoveredPort = info.port;
+				this._discoveredChannel = info.channel;
+				await this.connect();
+
+				// If connection failed, Unity is truly gone — clean up the stale file
+				if (this._connectionState !== UnityBridgeConnectionState.Connected) {
+					this._logDiscoveryTransition(DiscoveryState.NotFound, 'Stale discovery file removed (Unity not responding)');
+					try {
+						await this.fileService.del(discoveryUri);
+					} catch {
+						// Ignore delete errors — file may already be gone
+					}
 				}
 				return;
 			}
