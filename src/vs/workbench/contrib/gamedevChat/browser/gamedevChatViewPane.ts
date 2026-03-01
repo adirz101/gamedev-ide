@@ -1059,6 +1059,9 @@ export class GameDevChatViewPane extends ViewPane {
 				// Hide phase indicator once responding — content speaks for itself
 				this.streamingPhaseElement.style.display = 'none';
 				return;
+			case StreamingPhase.WaitingForCompilation:
+				text = 'Waiting for Unity to compile scripts...';
+				break;
 			case StreamingPhase.Applying: {
 				// Hide the simple phase indicator — the applying section takes over
 				this.streamingPhaseElement.style.display = 'none';

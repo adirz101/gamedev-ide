@@ -38,14 +38,29 @@ The \`unity_bridge\` tool accepts a \`commands\` array. Each command has \`categ
 **GameObjects**:
 - create — empty object (name, parentPath?)
 - createPrimitive — shape (name, primitiveType: Sphere|Capsule|Cylinder|Cube|Plane|Quad, parentPath?)
+  NOTE: Canvas, EventSystem, and UI elements are NOT primitives. Create them with gameObject.create + component.add (e.g. create "Canvas" then add "Canvas", "CanvasScaler", "GraphicRaycaster" components; create "EventSystem" then add "EventSystem", "StandaloneInputModule")
 - setTransform — position/rotate/scale (gameObjectPath, position?, rotation?, scale?) vectors as "[x,y,z]"
 - destroy (gameObjectPath) / setActive (gameObjectPath, active)
 
 **Components**:
 - add — add built-in (Rigidbody, BoxCollider, AudioSource...) or custom scripts by class name (gameObjectPath, componentType)
 - remove (gameObjectPath, componentType)
-- setProperty (gameObjectPath, componentType, propertyName, value)
+- setProperty (gameObjectPath, componentType, propertyName, value) — sets ANY serialized field
 - getAll (gameObjectPath)
+
+**CRITICAL — Wiring Up References with setProperty:**
+When a script has serialized fields (public or [SerializeField]) that reference GameObjects, UI elements, or other components, you MUST use \`component.setProperty\` to assign them AFTER creating all objects. The \`value\` is the **scene hierarchy path** of the target object (e.g. "Canvas/MainMenuPanel") or an asset path (e.g. "Assets/Materials/Red.mat").
+- For GameObject fields: value = scene path of the target (e.g. "Canvas/Panel")
+- For Component fields (Button, Image, Text, etc.): value = scene path of the GameObject that has that component
+- For assets (Sprite, Material, AudioClip): value = asset path (e.g. "Assets/Sprites/Icon.png")
+- Example: \`{ category: "component", action: "setProperty", params: { gameObjectPath: "GameManager", componentType: "MainMenuManager", propertyName: "mainMenuPanel", value: "Canvas/MainMenuPanel" } }\`
+
+**Always wire up ALL serialized reference fields** — unassigned references cause runtime errors (UnassignedReferenceException). After creating objects and adding scripts, review each script's serialized fields and set every reference.
+
+**Common enum values for setProperty:**
+- TextMeshPro alignment: TopLeft, Top, TopRight, Left, Center, Right, BottomLeft, Bottom, BottomRight, MidlineLeft, Midline, MidlineRight (NOT MiddleLeft/MiddleRight/MiddleCenter)
+- Canvas renderMode: ScreenSpaceOverlay, ScreenSpaceCamera, WorldSpace
+- Image type: Simple, Sliced, Tiled, Filled
 
 **Prefabs**: create (gameObjectPath, assetPath), instantiate (prefabPath)
 
@@ -53,10 +68,13 @@ The \`unity_bridge\` tool accepts a \`commands\` array. Each command has \`categ
 
 **Editor**: play, stop, pause | **Project**: refresh
 
-### Example Workflow
+### Workflow
 
-1. First, write the C# script file (as a code file)
-2. Then call the \`unity_bridge\` tool with your commands
-3. Check the results — if a component wasn't found (script not compiled yet), the system will wait for compilation and retry automatically
-4. After success, tell the user what was created`;
+1. Write any C# script files needed (behavior, managers, etc.)
+2. Call \`unity_bridge\` ONCE with ALL commands in a single tool call — include object creation, transforms, component additions, AND reference wiring all together. Do NOT split into multiple tool calls.
+3. Check results — if a component wasn't found (script not compiled yet), the system will wait for compilation and retry automatically
+4. Only make a second tool call if there were errors that need retrying
+5. After ALL commands succeed, summarize what was created
+
+**IMPORTANT: Minimize tool calls.** Each tool call triggers a full API round-trip. Put ALL commands (create objects, add components, set properties, wire references) in ONE commands array.`;
 }

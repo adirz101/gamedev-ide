@@ -154,13 +154,10 @@ export const IUnityBridgeService = createDecorator<IUnityBridgeService>('unityBr
 export const BRIDGE_DISCOVERY_PATH = 'Library/GameDevIDE/bridge.json';
 
 /** Protocol version for compatibility checking */
-export const BRIDGE_PROTOCOL_VERSION = '2.0';
-
-/** Channel name used by the MPE ChannelService in the Unity plugin */
-export const BRIDGE_CHANNEL_NAME = 'gamedev_bridge';
+export const BRIDGE_PROTOCOL_VERSION = '1.0';
 
 /** Set of protocol versions this IDE build can talk to */
-export const BRIDGE_SUPPORTED_VERSIONS = new Set(['1.0', '2.0']);
+export const BRIDGE_SUPPORTED_VERSIONS = new Set(['1.0']);
 
 /** How long to wait for a command response before timing out */
 export const BRIDGE_COMMAND_TIMEOUT_MS = 10_000;

@@ -2,12 +2,11 @@
  *  GameDev IDE Bridge — Unity Editor Plugin  (AUTO-INSTALLED by GameDev IDE)
  *
  *  This file is automatically managed by GameDev IDE. Do not edit manually.
- *  It registers a channel on Unity's MPE ChannelService so the IDE can
- *  communicate with the running Unity Editor to create GameObjects, scenes,
- *  prefabs, etc. The connection survives domain reloads (script recompilation).
+ *  It opens a WebSocket server on localhost so the IDE can communicate with
+ *  the running Unity Editor to create GameObjects, scenes, prefabs, etc.
  *
- *  Protocol version: 2.0
- *  Plugin version: 2.0.0
+ *  Protocol version: 1.0
+ *  Plugin version: 1.3.1
  *--------------------------------------------------------------------------------------------*/
 
 using UnityEngine;
@@ -16,86 +15,368 @@ using UnityEditor.SceneManagement;
 using UnityEngine.SceneManagement;
 using System;
 using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Net.WebSockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Linq;
-using Unity.MPE;
 
 [InitializeOnLoad]
 public static class GameDevIDEBridge
 {
-    private const string PROTOCOL_VERSION = "2.0";
-    private const string CHANNEL_NAME = "gamedev_bridge";
+    private const string PROTOCOL_VERSION = "1.0";
     private const string DISCOVERY_DIR = "Library/GameDevIDE";
     private const string DISCOVERY_FILE = "Library/GameDevIDE/bridge.json";
 
-    private static Action _disconnectChannel;
-    private static int _activeConnectionId = -1;
+    private static TcpListener _listener;
+    private static TcpClient _tcpClient;
+    private static NetworkStream _clientStream;
+    private static CancellationTokenSource _cts;
     private static readonly ConcurrentQueue<string> _incomingMessages = new ConcurrentQueue<string>();
     private static readonly ConcurrentQueue<string> _outgoingMessages = new ConcurrentQueue<string>();
+    private static int _port;
+    private static bool _running;
+    private static bool _clientConnected;
 
     static GameDevIDEBridge()
     {
         EditorApplication.update += ProcessMessages;
-        EditorApplication.update += FlushOutgoing;
         EditorApplication.quitting += Shutdown;
+        AssemblyReloadEvents.beforeAssemblyReload += OnBeforeReload;
         Application.logMessageReceived += OnLogMessage;
         EditorApplication.playModeStateChanged += OnPlayModeChanged;
-        StartChannel();
+        StartServer();
     }
 
-    // --- Channel Lifecycle (MPE ChannelService) ---
+    // --- Server Lifecycle (TcpListener + manual WebSocket handshake) ---
 
-    private static void StartChannel()
+    private static async void StartServer()
     {
+        if (_running) return;
+
         try
         {
-            if (!ChannelService.IsRunning())
-                ChannelService.Start();
+            _cts = new CancellationTokenSource();
 
-            _disconnectChannel = ChannelService.GetOrCreateChannel(CHANNEL_NAME,
-                (int connectionId, byte[] data) =>
-                {
-                    _activeConnectionId = connectionId;
-                    _incomingMessages.Enqueue(Encoding.UTF8.GetString(data));
-                });
+            // Bind to port 0 for auto-assignment
+            _listener = new TcpListener(IPAddress.Loopback, 0);
+            _listener.Start();
+            _port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+            _running = true;
 
-            var port = ChannelService.GetPort();
-            WriteDiscoveryFile(port);
-            Debug.Log($"[GameDevIDE Bridge] Channel registered on port {port} (v{PROTOCOL_VERSION})");
+            WriteDiscoveryFile();
+            Debug.Log($"[GameDevIDE Bridge] Started on port {_port} (v{PROTOCOL_VERSION})");
+
+            // Accept connections in background
+            await AcceptConnections(_cts.Token);
         }
         catch (Exception ex)
         {
-            Debug.LogError($"[GameDevIDE Bridge] Failed to start channel: {ex.Message}");
+            Debug.LogError($"[GameDevIDE Bridge] Failed to start: {ex.Message}");
+            _running = false;
         }
     }
 
-    private static void SendResponse(string json)
+    private static async Task AcceptConnections(CancellationToken token)
     {
-        if (_activeConnectionId < 0) return;
-        _outgoingMessages.Enqueue(json);
-    }
-
-    private static void FlushOutgoing()
-    {
-        while (_outgoingMessages.TryDequeue(out var json))
+        while (!token.IsCancellationRequested && _running)
         {
-            if (_activeConnectionId < 0) break;
-            ChannelService.Send(_activeConnectionId, Encoding.UTF8.GetBytes(json));
+            try
+            {
+                var client = await _listener.AcceptTcpClientAsync();
+                var stream = client.GetStream();
+
+                // Read the HTTP upgrade request
+                var buffer = new byte[4096];
+                int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, token);
+                var request = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
+                if (request.Contains("Upgrade: websocket") || request.Contains("Upgrade: WebSocket"))
+                {
+                    // Only allow one client at a time
+                    if (_clientConnected)
+                    {
+                        var reject = Encoding.UTF8.GetBytes("HTTP/1.1 409 Conflict\r\n\r\n");
+                        await stream.WriteAsync(reject, 0, reject.Length, token);
+                        client.Close();
+                        continue;
+                    }
+
+                    // Perform WebSocket handshake
+                    if (PerformWebSocketHandshake(stream, request))
+                    {
+                        _tcpClient = client;
+                        _clientStream = stream;
+                        _clientConnected = true;
+                        Debug.Log("[GameDevIDE Bridge] IDE connected");
+
+                        _ = ReceiveMessages(stream, token);
+                        _ = SendMessages(stream, token);
+                    }
+                    else
+                    {
+                        client.Close();
+                    }
+                }
+                else
+                {
+                    // Simple health check
+                    var body = "{\"status\":\"ok\",\"version\":\"" + PROTOCOL_VERSION + "\"}";
+                    var response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + body.Length + "\r\nConnection: close\r\n\r\n" + body;
+                    var responseBytes = Encoding.UTF8.GetBytes(response);
+                    await stream.WriteAsync(responseBytes, 0, responseBytes.Length, token);
+                    client.Close();
+                }
+            }
+            catch (ObjectDisposedException) { break; }
+            catch (SocketException) { break; }
+            catch (Exception ex)
+            {
+                if (!token.IsCancellationRequested)
+                    Debug.LogWarning($"[GameDevIDE Bridge] Connection error: {ex.Message}");
+            }
         }
     }
 
-    private static void WriteDiscoveryFile(int port)
+    private static bool PerformWebSocketHandshake(NetworkStream stream, string request)
+    {
+        try
+        {
+            // Extract Sec-WebSocket-Key from the request headers
+            var keyMatch = Regex.Match(request, @"Sec-WebSocket-Key:\s*(.+?)\r\n");
+            if (!keyMatch.Success) return false;
+
+            var key = keyMatch.Groups[1].Value.Trim();
+            var acceptKey = Convert.ToBase64String(
+                SHA1.Create().ComputeHash(
+                    Encoding.UTF8.GetBytes(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+                )
+            );
+
+            var response =
+                "HTTP/1.1 101 Switching Protocols\r\n" +
+                "Upgrade: websocket\r\n" +
+                "Connection: Upgrade\r\n" +
+                "Sec-WebSocket-Accept: " + acceptKey + "\r\n\r\n";
+
+            var responseBytes = Encoding.UTF8.GetBytes(response);
+            stream.Write(responseBytes, 0, responseBytes.Length);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[GameDevIDE Bridge] Handshake failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static async Task ReceiveMessages(NetworkStream stream, CancellationToken token)
+    {
+        var buffer = new byte[8192];
+
+        try
+        {
+            while (_clientConnected && !token.IsCancellationRequested)
+            {
+                if (!stream.DataAvailable)
+                {
+                    await Task.Delay(8, token);
+                    continue;
+                }
+
+                int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, token);
+                if (bytesRead == 0)
+                {
+                    Debug.Log("[GameDevIDE Bridge] IDE disconnected");
+                    break;
+                }
+
+                // Decode WebSocket frame(s)
+                int offset = 0;
+                while (offset < bytesRead)
+                {
+                    var frame = DecodeWebSocketFrame(buffer, offset, bytesRead - offset);
+                    if (frame == null) break;
+
+                    offset += frame.TotalLength;
+
+                    if (frame.Opcode == 0x8) // Close
+                    {
+                        // Send close frame back
+                        var closeFrame = new byte[] { 0x88, 0x00 };
+                        await stream.WriteAsync(closeFrame, 0, closeFrame.Length, token);
+                        Debug.Log("[GameDevIDE Bridge] IDE disconnected (close frame)");
+                        DisconnectClient();
+                        return;
+                    }
+
+                    if (frame.Opcode == 0x9) // Ping
+                    {
+                        // Send pong
+                        var pong = EncodeWebSocketFrame(frame.Payload, 0xA);
+                        await stream.WriteAsync(pong, 0, pong.Length, token);
+                        continue;
+                    }
+
+                    if (frame.Opcode == 0x1 || frame.Opcode == 0x2) // Text or Binary
+                    {
+                        var message = Encoding.UTF8.GetString(frame.Payload);
+                        _incomingMessages.Enqueue(message);
+                    }
+                }
+            }
+        }
+        catch (IOException) { /* Client disconnected */ }
+        catch (OperationCanceledException) { /* Shutting down */ }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[GameDevIDE Bridge] Receive error: {ex.Message}");
+        }
+
+        DisconnectClient();
+    }
+
+    private static async Task SendMessages(NetworkStream stream, CancellationToken token)
+    {
+        try
+        {
+            while (_clientConnected && !token.IsCancellationRequested)
+            {
+                if (_outgoingMessages.TryDequeue(out var message))
+                {
+                    var payload = Encoding.UTF8.GetBytes(message);
+                    var frame = EncodeWebSocketFrame(payload, 0x1); // Text frame
+                    await stream.WriteAsync(frame, 0, frame.Length, token);
+                }
+                else
+                {
+                    await Task.Delay(16, token); // ~60Hz poll
+                }
+            }
+        }
+        catch (IOException) { }
+        catch (OperationCanceledException) { }
+    }
+
+    private static void DisconnectClient()
+    {
+        _clientConnected = false;
+        try { _clientStream?.Close(); } catch { }
+        try { _tcpClient?.Close(); } catch { }
+        _clientStream = null;
+        _tcpClient = null;
+    }
+
+    // --- WebSocket Frame Encoding/Decoding ---
+
+    private class WebSocketFrame
+    {
+        public byte Opcode;
+        public byte[] Payload;
+        public int TotalLength; // Total bytes consumed from buffer
+    }
+
+    private static WebSocketFrame DecodeWebSocketFrame(byte[] buffer, int offset, int length)
+    {
+        if (length < 2) return null;
+
+        var opcode = (byte)(buffer[offset] & 0x0F);
+        var masked = (buffer[offset + 1] & 0x80) != 0;
+        long payloadLen = buffer[offset + 1] & 0x7F;
+        int headerLen = 2;
+
+        if (payloadLen == 126)
+        {
+            if (length < 4) return null;
+            payloadLen = (buffer[offset + 2] << 8) | buffer[offset + 3];
+            headerLen = 4;
+        }
+        else if (payloadLen == 127)
+        {
+            if (length < 10) return null;
+            payloadLen = 0;
+            for (int i = 0; i < 8; i++)
+                payloadLen = (payloadLen << 8) | buffer[offset + 2 + i];
+            headerLen = 10;
+        }
+
+        byte[] maskKey = null;
+        if (masked)
+        {
+            if (length < headerLen + 4) return null;
+            maskKey = new byte[4];
+            Array.Copy(buffer, offset + headerLen, maskKey, 0, 4);
+            headerLen += 4;
+        }
+
+        if (length < headerLen + payloadLen) return null;
+
+        var payload = new byte[payloadLen];
+        Array.Copy(buffer, offset + headerLen, payload, 0, (int)payloadLen);
+
+        if (masked && maskKey != null)
+        {
+            for (int i = 0; i < payload.Length; i++)
+                payload[i] ^= maskKey[i % 4];
+        }
+
+        return new WebSocketFrame
+        {
+            Opcode = opcode,
+            Payload = payload,
+            TotalLength = headerLen + (int)payloadLen
+        };
+    }
+
+    private static byte[] EncodeWebSocketFrame(byte[] payload, byte opcode)
+    {
+        var len = payload.Length;
+        byte[] frame;
+
+        if (len < 126)
+        {
+            frame = new byte[2 + len];
+            frame[0] = (byte)(0x80 | opcode); // FIN + opcode
+            frame[1] = (byte)len;
+            Array.Copy(payload, 0, frame, 2, len);
+        }
+        else if (len < 65536)
+        {
+            frame = new byte[4 + len];
+            frame[0] = (byte)(0x80 | opcode);
+            frame[1] = 126;
+            frame[2] = (byte)(len >> 8);
+            frame[3] = (byte)(len & 0xFF);
+            Array.Copy(payload, 0, frame, 4, len);
+        }
+        else
+        {
+            frame = new byte[10 + len];
+            frame[0] = (byte)(0x80 | opcode);
+            frame[1] = 127;
+            for (int i = 0; i < 8; i++)
+                frame[2 + i] = (byte)((len >> (56 - i * 8)) & 0xFF);
+            Array.Copy(payload, 0, frame, 10, len);
+        }
+
+        return frame;
+    }
+
+    private static void WriteDiscoveryFile()
     {
         try
         {
             if (!Directory.Exists(DISCOVERY_DIR))
                 Directory.CreateDirectory(DISCOVERY_DIR);
 
-            var json = $"{{\"port\":{port},\"pid\":{System.Diagnostics.Process.GetCurrentProcess().Id},\"version\":\"{PROTOCOL_VERSION}\",\"channel\":\"{CHANNEL_NAME}\",\"timestamp\":{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}}}";
+            var json = $"{{\"port\":{_port},\"pid\":{System.Diagnostics.Process.GetCurrentProcess().Id},\"version\":\"{PROTOCOL_VERSION}\",\"timestamp\":{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}}}";
             File.WriteAllText(DISCOVERY_FILE, json);
         }
         catch (Exception ex)
@@ -106,10 +387,13 @@ public static class GameDevIDEBridge
 
     private static void Shutdown()
     {
-        try { _disconnectChannel?.Invoke(); }
-        catch { }
+        _running = false;
+        _cts?.Cancel();
 
-        _activeConnectionId = -1;
+        DisconnectClient();
+
+        try { _listener?.Stop(); }
+        catch { }
 
         try { if (File.Exists(DISCOVERY_FILE)) File.Delete(DISCOVERY_FILE); }
         catch { }
@@ -117,11 +401,17 @@ public static class GameDevIDEBridge
         Debug.Log("[GameDevIDE Bridge] Stopped");
     }
 
+    private static void OnBeforeReload()
+    {
+        // Clean up before domain reload (script recompilation)
+        Shutdown();
+    }
+
     // --- Unity Event Forwarding ---
 
     private static void OnLogMessage(string condition, string stackTrace, LogType type)
     {
-        if (_activeConnectionId < 0) return;
+        if (!_clientConnected) return;
 
         var logType = type switch
         {
@@ -133,12 +423,12 @@ public static class GameDevIDEBridge
         };
 
         var eventJson = $"{{\"id\":\"{Guid.NewGuid()}\",\"type\":\"event\",\"event\":\"console.log\",\"data\":{{\"message\":{EscapeJson(condition)},\"stackTrace\":{EscapeJson(stackTrace ?? "")},\"logType\":\"{logType}\",\"timestamp\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}}}}}";
-        SendResponse(eventJson);
+        _outgoingMessages.Enqueue(eventJson);
     }
 
     private static void OnPlayModeChanged(PlayModeStateChange state)
     {
-        if (_activeConnectionId < 0) return;
+        if (!_clientConnected) return;
 
         var playState = state switch
         {
@@ -150,16 +440,16 @@ public static class GameDevIDEBridge
         };
 
         var eventJson = $"{{\"id\":\"{Guid.NewGuid()}\",\"type\":\"event\",\"event\":\"playModeChanged\",\"data\":{{\"state\":\"{playState}\"}}}}";
-        SendResponse(eventJson);
+        _outgoingMessages.Enqueue(eventJson);
     }
 
     // --- Message Processing (Main Thread) ---
 
     private static void ProcessMessages()
     {
-        // Process up to 50 messages per frame to handle command bursts quickly
+        // Process up to 10 messages per frame to avoid blocking
         int processed = 0;
-        while (_incomingMessages.TryDequeue(out var message) && processed < 50)
+        while (_incomingMessages.TryDequeue(out var message) && processed < 10)
         {
             processed++;
             string requestId = "unknown";
@@ -168,12 +458,12 @@ public static class GameDevIDEBridge
                 var request = ParseRequest(message);
                 requestId = request.id;
                 var response = HandleCommand(request);
-                SendResponse(response);
+                _outgoingMessages.Enqueue(response);
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[GameDevIDE Bridge] Error processing message: {ex.Message}");
-                SendResponse(MakeError(requestId, ex.Message));
+                _outgoingMessages.Enqueue(MakeError(requestId, ex.Message));
             }
         }
     }

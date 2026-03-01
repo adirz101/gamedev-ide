@@ -26,6 +26,7 @@ export const enum StreamingPhase {
 	Thinking = 2,
 	Responding = 3,
 	Applying = 4,
+	WaitingForCompilation = 5,
 }
 
 export const enum ChatMode {
@@ -670,25 +671,40 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			body.tools = tools;
 		}
 
-		const response = await fetch('https://api.anthropic.com/v1/messages', {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'x-api-key': this._apiKey!,
-				'anthropic-version': '2023-06-01',
-				'anthropic-dangerous-direct-browser-access': 'true',
-				'anthropic-beta': 'prompt-caching-2024-07-31,interleaved-thinking-2025-05-14',
-			},
-			body: JSON.stringify(body),
-			signal: this._abortController?.signal,
-		});
+		// Retry with backoff for rate limit (429) errors
+		let response: Response | undefined;
+		const maxRetries = 3;
+		for (let attempt = 0; attempt <= maxRetries; attempt++) {
+			response = await fetch('https://api.anthropic.com/v1/messages', {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'x-api-key': this._apiKey!,
+					'anthropic-version': '2023-06-01',
+					'anthropic-dangerous-direct-browser-access': 'true',
+					'anthropic-beta': 'prompt-caching-2024-07-31,interleaved-thinking-2025-05-14',
+				},
+				body: JSON.stringify(body),
+				signal: this._abortController?.signal,
+			});
 
-		if (!response.ok) {
-			const errorText = await response.text();
-			throw new Error(`API error: ${response.status} - ${errorText}`);
+			if (response.status !== 429 || attempt === maxRetries) {
+				break;
+			}
+
+			// Parse retry-after header or use exponential backoff
+			const retryAfter = response.headers.get('retry-after');
+			const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : Math.min(2000 * Math.pow(2, attempt), 60_000);
+			await new Promise(resolve => setTimeout(resolve, waitMs));
 		}
 
-		const reader = response.body?.getReader();
+		const finalResponse = response!;
+		if (!finalResponse.ok) {
+			const errorText = await finalResponse.text();
+			throw new Error(`API error: ${finalResponse.status} - ${errorText}`);
+		}
+
+		const reader = finalResponse.body?.getReader();
 		if (!reader) {
 			throw new Error('No response body');
 		}
@@ -891,24 +907,33 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 				.map(p => (p.split('/').pop() ?? '').replace('.cs', ''))
 		);
 
-		const isCompilationError = (error: string | undefined): boolean => {
-			if (!error || writtenScriptNames.size === 0) {
+		const isRetryableError = (error: string | undefined): boolean => {
+			if (!error) {
 				return false;
 			}
+			// Connection lost mid-execution (domain reload killed WebSocket)
+			if (error.includes('not connected') || error.includes('timeout') || error.includes('WebSocket')) {
+				return true;
+			}
+			// Script not compiled yet
 			if (error.includes('Component type not found')) {
 				return true;
 			}
-			const match = error.match(/Component not found: (\w+)/);
-			if (match && writtenScriptNames.has(match[1])) {
-				return true;
+			if (writtenScriptNames.size > 0) {
+				const match = error.match(/Component not found: (\w+)/);
+				if (match && writtenScriptNames.has(match[1])) {
+					return true;
+				}
 			}
 			return false;
 		};
 
-		// First pass — execute all commands
+		// Execute commands, collecting results. When we detect a connection drop,
+		// stop executing and queue all remaining commands for retry.
 		type RetryEntry = { cmd: typeof commands[number]; cmdLabel: string; resultIdx: number };
 		const retryQueue: RetryEntry[] = [];
 		const results: Array<{ command: string; success: boolean; error?: string; result?: unknown }> = [];
+		let connectionLost = false;
 
 		if (!assistantMessage.bridgeResults) {
 			assistantMessage.bridgeResults = [];
@@ -921,6 +946,14 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			}
 
 			const cmdLabel = `${cmd.category}.${cmd.action}`;
+
+			// If connection already dropped, queue remaining commands directly without trying
+			if (connectionLost) {
+				const resultIdx = results.push({ command: cmdLabel, success: false, error: 'Queued for retry after reconnect' }) - 1;
+				retryQueue.push({ cmd, cmdLabel, resultIdx });
+				continue;
+			}
+
 			this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'start' });
 
 			try {
@@ -944,8 +977,12 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 					error: response.error,
 				});
 
-				if (!response.success && isCompilationError(response.error)) {
+				if (!response.success && isRetryableError(response.error)) {
 					retryQueue.push({ cmd, cmdLabel, resultIdx });
+					// Check if this is a connection loss — if so, skip remaining commands
+					if (response.error && (response.error.includes('not connected') || response.error.includes('timeout'))) {
+						connectionLost = true;
+					}
 					this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'error', detail: response.error });
 				} else {
 					this._onDidApplyActivity.fire({
@@ -957,62 +994,88 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 				}
 			} catch (error) {
 				const errorMsg = error instanceof Error ? error.message : String(error);
-				results.push({ command: cmdLabel, success: false, error: errorMsg });
+				const resultIdx = results.push({ command: cmdLabel, success: false, error: errorMsg }) - 1;
 				assistantMessage.bridgeResults!.push({ category: cmd.category, action: cmd.action, success: false, error: errorMsg });
+
+				if (isRetryableError(errorMsg)) {
+					retryQueue.push({ cmd, cmdLabel, resultIdx });
+					connectionLost = true;
+				}
 				this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'error', detail: errorMsg });
 			}
 		}
 
-		// Second pass — if any commands need compilation, wait for Unity's domain reload and retry
+		// Retry pass — wait for Unity to reconnect (after domain reload) and replay failed commands
 		if (retryQueue.length > 0) {
+			// Show "Waiting for compilation" as a visible phase in the chat (like Thinking...)
+			assistantMessage.streamingPhase = StreamingPhase.WaitingForCompilation;
+			this._onDidReceiveChunk.fire({
+				messageId: assistantMessage.id,
+				type: 'phase_change',
+				phase: StreamingPhase.WaitingForCompilation,
+			});
 			this._onDidApplyActivity.fire({
 				messageId: assistantMessage.id,
-				action: 'Waiting for Unity to compile new scripts',
+				action: `Waiting for Unity to reconnect (${retryQueue.length} commands to retry)`,
 				status: 'start',
 			});
 			this._onDidUpdateMessages.fire();
 
 			const outcome = await this._waitForBridgeReconnect(120_000);
 
+			// Restore the applying phase
+			assistantMessage.streamingPhase = StreamingPhase.Applying;
+			this._onDidReceiveChunk.fire({
+				messageId: assistantMessage.id,
+				type: 'phase_change',
+				phase: StreamingPhase.Applying,
+			});
 			this._onDidApplyActivity.fire({
 				messageId: assistantMessage.id,
-				action: outcome === 'reconnected' ? 'Compilation done, retrying' : 'Compilation wait timed out',
+				action: outcome === 'reconnected'
+					? `Unity reconnected, retrying ${retryQueue.length} commands`
+					: 'Unity reconnection timed out',
 				status: 'done',
 			});
 
-			for (const { cmd, cmdLabel, resultIdx } of retryQueue) {
-				this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'start' });
-				try {
-					const response = await this.unityBridgeService.sendCommand(
-						cmd.category as BridgeCommandCategory,
-						cmd.action,
-						cmd.params,
-					);
-					results[resultIdx] = { command: cmdLabel, success: response.success, error: response.error };
-
-					// Update bridge results in the assistant message
-					const brIdx = assistantMessage.bridgeResults!.findIndex(
-						r => r.category === cmd.category && r.action === cmd.action && !r.success
-					);
-					if (brIdx >= 0) {
-						assistantMessage.bridgeResults![brIdx] = {
-							category: cmd.category,
-							action: cmd.action,
-							success: response.success,
-							error: response.error,
-						};
+			if (outcome === 'reconnected') {
+				for (const { cmd, cmdLabel, resultIdx } of retryQueue) {
+					if (this._abortController?.signal.aborted) {
+						break;
 					}
+					this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'start' });
+					try {
+						const response = await this.unityBridgeService.sendCommand(
+							cmd.category as BridgeCommandCategory,
+							cmd.action,
+							cmd.params,
+						);
+						results[resultIdx] = { command: cmdLabel, success: response.success, error: response.error };
 
-					this._onDidApplyActivity.fire({
-						messageId: assistantMessage.id,
-						action: cmdLabel,
-						status: response.success ? 'done' : 'error',
-						detail: response.error,
-					});
-				} catch (error) {
-					const errorMsg = error instanceof Error ? error.message : String(error);
-					results[resultIdx] = { command: cmdLabel, success: false, error: errorMsg };
-					this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'error', detail: errorMsg });
+						// Update bridge results in the assistant message
+						const brIdx = assistantMessage.bridgeResults!.findIndex(
+							r => r.category === cmd.category && r.action === cmd.action && !r.success
+						);
+						if (brIdx >= 0) {
+							assistantMessage.bridgeResults![brIdx] = {
+								category: cmd.category,
+								action: cmd.action,
+								success: response.success,
+								error: response.error,
+							};
+						}
+
+						this._onDidApplyActivity.fire({
+							messageId: assistantMessage.id,
+							action: cmdLabel,
+							status: response.success ? 'done' : 'error',
+							detail: response.error,
+						});
+					} catch (error) {
+						const errorMsg = error instanceof Error ? error.message : String(error);
+						results[resultIdx] = { command: cmdLabel, success: false, error: errorMsg };
+						this._onDidApplyActivity.fire({ messageId: assistantMessage.id, action: cmdLabel, status: 'error', detail: errorMsg });
+					}
 				}
 			}
 		}
@@ -1031,8 +1094,16 @@ export class GameDevChatService extends Disposable implements IGameDevChatServic
 			status: allSucceeded ? 'done' : 'error',
 		});
 
+		// Compact results: only include failures (with error) to save tokens.
+		// Successes are implied by the summary.
+		const compactResults = allSucceeded
+			? undefined
+			: results.filter(r => !r.success).map(r => ({ command: r.command, error: r.error }));
+
 		return {
-			text: JSON.stringify({ success: allSucceeded, summary, results }),
+			text: JSON.stringify(compactResults
+				? { success: false, summary, failed: compactResults }
+				: { success: true, summary }),
 			isError: !allSucceeded,
 		};
 	}
